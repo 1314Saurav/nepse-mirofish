@@ -322,8 +322,8 @@ def _save_trade_analysis(trades: list[dict], output_dir: Path) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _generate_report_text(metrics: dict, wf: dict, stress: dict, mc: dict, attr: dict) -> str:
-    """Call Claude to generate the narrative report text."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    """Call Groq to generate the narrative report text."""
+    api_key = os.environ.get("LLM_API_KEY", "")
     if not api_key or "your_" in api_key:
         return _fallback_report_text(metrics, wf, stress, mc, attr)
 
@@ -365,16 +365,20 @@ def _generate_report_text(metrics: dict, wf: dict, stress: dict, mc: dict, attr:
     )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key,
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+        )
+        model = os.environ.get("LLM_MODEL_NAME", "llama-3.3-70b-versatile")
+        response = client.chat.completions.create(
+            model=model,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
-        return msg.content[0].text
+        return response.choices[0].message.content
     except Exception as exc:
-        logger.warning("Claude report generation failed: %s", exc)
+        logger.warning("Groq report generation failed: %s", exc)
         return _fallback_report_text(metrics, wf, stress, mc, attr)
 
 

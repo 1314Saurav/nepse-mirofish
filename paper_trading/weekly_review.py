@@ -288,12 +288,12 @@ class WeeklyReviewer:
         wd = self.collect_week_data()
         wd.week_num = week_num
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        api_key = os.getenv("LLM_API_KEY", "")
         if api_key and not api_key.startswith("your_"):
             return self._generate_with_claude(wd, api_key)
         else:
             logger.warning(
-                "ANTHROPIC_API_KEY not set — generating template-based report for week %d", week_num
+                "LLM_API_KEY not set — generating template-based report for week %d", week_num
             )
             return self._generate_template_report(wd)
 
@@ -462,26 +462,30 @@ class WeeklyReviewer:
     # ── Claude generation ────────────────────────────────────────────────────
 
     def _generate_with_claude(self, wd: WeekData, api_key: str) -> str:
-        """Call Claude claude-sonnet-4-5 to write the review."""
-        import anthropic
+        """Call Groq (llama-3.3-70b-versatile) to write the weekly review."""
+        from openai import OpenAI
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+        )
 
         data_dict = self._wd_to_dict(wd)
         prompt = self._build_prompt(wd, data_dict)
+        model = os.getenv("LLM_MODEL_NAME", "llama-3.3-70b-versatile")
 
-        logger.info("Calling Claude claude-sonnet-4-5 for week %d review…", wd.week_num)
+        logger.info("Calling Groq %s for week %d review…", model, wd.week_num)
         try:
-            message = client.messages.create(
-                model="claude-sonnet-4-5",
+            response = client.chat.completions.create(
+                model=model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
-            content = message.content[0].text
+            content = response.choices[0].message.content
             header = self._build_report_header(wd)
             return header + "\n\n" + content
         except Exception as exc:
-            logger.error("Claude API call failed: %s — falling back to template", exc)
+            logger.error("Groq API call failed: %s — falling back to template", exc)
             return self._generate_template_report(wd)
 
     def _build_prompt(self, wd: WeekData, data_dict: dict) -> str:

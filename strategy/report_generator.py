@@ -198,52 +198,27 @@ Constraints:
 # ---------------------------------------------------------------------------
 
 def _call_claude_api(prompt: str) -> Optional[str]:
-    """Call Anthropic Claude API and return the response text."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key or api_key.startswith("your_") or api_key.startswith("sk-ant-api03-REPLACE"):
-        logger.warning("ANTHROPIC_API_KEY not configured")
+    """Call Groq LLM API and return the response text."""
+    api_key = os.environ.get("LLM_API_KEY", "")
+    if not api_key or api_key.startswith("your_"):
+        logger.warning("LLM_API_KEY not configured")
         return None
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-opus-4-5",
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key,
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+        )
+        model = os.environ.get("LLM_MODEL_NAME", "llama-3.3-70b-versatile")
+        response = client.chat.completions.create(
+            model=model,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
-        return message.content[0].text if message.content else None
-    except ImportError:
-        logger.warning("anthropic package not installed; trying requests fallback")
+        return response.choices[0].message.content
     except Exception as exc:
-        logger.error("Claude API error: %s", exc)
-        return None
-
-    # Fallback: raw HTTP via requests / urllib
-    try:
-        import json as _json
-        import urllib.request as _req
-
-        payload = _json.dumps({
-            "model": "claude-opus-4-5",
-            "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}],
-        }).encode()
-
-        http_req = _req.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-        )
-        with _req.urlopen(http_req, timeout=60) as resp:
-            result = _json.loads(resp.read())
-            return result["content"][0]["text"]
-    except Exception as exc:
-        logger.error("Claude API fallback error: %s", exc)
+        logger.error("Groq API error: %s", exc)
         return None
 
 
