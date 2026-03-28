@@ -1,0 +1,73 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# ── Data (large / generated) ──────────────────────────────────────────────────
+data/raw/
+data/processed/
+data/paper_trading/
+*.csv
+*.parquet
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.sqlite
+*.db
+*.db-shm
+*.db-wal
+
+# ── Alembic ────────────────────────────────────────────────────────────────────
+# keep migrations/ tracked; ignore auto-generated artefacts
+alembic/versions/__pycache__/
+
+# ── Node / frontend ────────────────────────────────────────────────────────────
+node_modules/
+mirofish/frontend/dist/
+mirofish/frontend/.vite/
+mirofish/frontend/coverage/
+
+# ── IDE & OS ───────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Backtest / report outputs ─────────────────────────────────────────────────
+data/processed/backtest/
+reports/
+*.html
+
+# ── Deployment flags ──────────────────────────────────────────────────────────
+TRADING_HALTED.flag

@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "MiroFish Backend (Flask)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["mirofish/backend/run.py"],
+      "port": 5001
+    },
+    {
+      "name": "MiroFish Frontend (Vite + Vue 3)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "mirofish/frontend"],
+      "port": 3000
+    },
+    {
+      "name": "Paper Trading Dashboard (FastAPI)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "paper_trading.live_dashboard"],
+      "port": 8080
+    }
+  ]
+}

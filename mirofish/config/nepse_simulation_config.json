@@ -1,0 +1,112 @@
+{
+  "_meta": {
+    "description": "NEPSE MiroFish simulation environment configuration",
+    "version": "1.0",
+    "note": "This is the reference config. MiroFish auto-generates its own simulation_config.json via LLM from the seed document. Use this to cross-validate or override."
+  },
+  "simulation_name": "NEPSE Market Sentiment Simulation",
+  "platforms": {
+    "platform_a": {
+      "type": "twitter_analog",
+      "name": "StockTalk Nepal",
+      "description": "Short-form posts, trending topics, rapid sentiment spread. Mimics Nepal's Twitter/X and Facebook financial communities.",
+      "max_post_length": 280,
+      "features": ["repost", "like", "follow", "trending_hashtags"],
+      "nepse_hashtags": ["#NEPSE", "#NepseToday", "#NepseAnalysis", "#ShareMarket", "#Nepal_Stocks"],
+      "velocity": "high",
+      "depth": "low",
+      "viral_threshold": 15,
+      "echo_chamber_strength": 0.4
+    },
+    "platform_b": {
+      "type": "reddit_analog",
+      "name": "r/NepseInvestors",
+      "description": "Threaded discussions, deep analysis, community voting. Mimics Nepali investment forums and Sharesansar discussion boards.",
+      "features": ["upvote", "downvote", "comment_thread", "flair"],
+      "flairs": ["Analysis", "News", "Question", "IPO", "Technicals", "NRB Watch", "Hydropower", "Diaspora"],
+      "velocity": "low",
+      "depth": "high",
+      "algorithm_weights": {
+        "recency": 0.3,
+        "popularity": 0.4,
+        "relevance": 0.3
+      }
+    }
+  },
+  "simulation_rounds": 12,
+  "round_duration_hours": 6,
+  "total_simulated_time": "3 trading days",
+  "minutes_per_oasis_round": 60,
+  "agent_activation_schedule": {
+    "morning_session": {
+      "rounds": [0, 1, 2],
+      "active_groups": ["retail_momentum", "diaspora_investor"],
+      "rationale": "Retail and diaspora investors most active at market open, checking overnight news"
+    },
+    "midday_session": {
+      "rounds": [3, 4, 5, 6],
+      "active_groups": ["institutional_broker", "hydro_analyst"],
+      "rationale": "Institutional brokers execute large orders mid-session; hydro analysts post technical commentary"
+    },
+    "afternoon_session": {
+      "rounds": [7, 8, 9, 10],
+      "active_groups": ["nrb_policy_watcher", "political_risk_analyst"],
+      "rationale": "Policy watchers respond to NRB and government announcements; political analysts post EOD commentary"
+    },
+    "breaking_news": {
+      "rounds": "all",
+      "active_groups": ["retail_momentum"],
+      "rationale": "Retail momentum agents react immediately to any breaking news at all hours"
+    },
+    "late_evening": {
+      "rounds": [11],
+      "active_groups": ["diaspora_investor", "nrb_policy_watcher"],
+      "rationale": "Diaspora investors in different timezones (Gulf +2:45, Malaysia +2:15 from NST) active in Nepal evening"
+    }
+  },
+  "cross_platform_seeding": true,
+  "memory_backend": "zep_cloud",
+  "time_config": {
+    "total_simulation_hours": 72,
+    "minutes_per_round": 360,
+    "agents_per_hour_min": 50,
+    "agents_per_hour_max": 200,
+    "activity_multipliers": {
+      "market_hours_9_15": 1.5,
+      "evening_19_22": 1.2,
+      "midnight_0_5": 0.1,
+      "weekend_reduction": 0.3
+    }
+  },
+  "output_metrics": [
+    "sentiment_score_per_round",
+    "agent_consensus_direction",
+    "sector_sentiment_breakdown",
+    "opinion_shift_velocity",
+    "cross_platform_divergence",
+    "influential_agent_ids",
+    "viral_posts",
+    "keyword_frequency"
+  ],
+  "nepse_specific_initial_events": {
+    "seed_topics": [
+      "NRB repo rate and monetary policy outlook",
+      "NEPSE index trend and technical levels",
+      "IPO and bonus share announcements",
+      "Hydropower sector PPA rate developments",
+      "Political stability and coalition government news",
+      "USD/NPR exchange rate and remittance flows"
+    ],
+    "banned_topics": [
+      "Crypto trading",
+      "Non-Nepal stocks"
+    ]
+  },
+  "quality_thresholds": {
+    "min_active_agents_per_round": 50,
+    "min_completed_rounds": 10,
+    "max_sentiment_lock": 0.95,
+    "max_platform_divergence": 0.6,
+    "min_sectors_covered": 4
+  }
+}

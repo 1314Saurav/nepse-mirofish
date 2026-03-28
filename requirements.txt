@@ -1,0 +1,14 @@
+requests
+beautifulsoup4
+lxml
+pandas
+sqlalchemy
+psycopg2-binary
+apscheduler
+python-dotenv
+pdfplumber
+feedparser
+anthropic
+alembic
+python-telegram-bot>=20.0
+pytest
