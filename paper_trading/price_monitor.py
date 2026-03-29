@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,16 @@ NEPSE_TRADING_WEEKDAYS = {0, 1, 2, 3, 6}   # Mon-Thu + Sun
 
 def _nst_now() -> datetime:
     return datetime.now(tz=NST)
+
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json, datetime
+    path = Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": datetime.datetime.now().isoformat(), "msg": msg}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def _is_market_hours() -> bool:
@@ -122,7 +133,7 @@ class LivePriceMonitor:
                        f"Price: NPR {current_price:,.2f} (prev close: NPR {prev_close:,.2f})\n"
                        f"Move: {((current_price/prev_close-1)*100):+.1f}%\n"
                        f"Do NOT place new orders in {symbol} today.")
-                self._send_telegram(msg)
+                _write_notification(msg)
 
         # NEPSE index move check
         nepse_index = current_prices.get("__NEPSE__")
@@ -135,7 +146,7 @@ class LivePriceMonitor:
                        f"NEPSE moved {direction} {abs(move_pct):.1f}% intraday\n"
                        f"Current: {nepse_index:,.2f} | Previous: {prev_nepse:,.2f}\n"
                        f"{'Consider regime re-assessment.' if abs(move_pct) > 3 else ''}")
-                self._send_telegram(msg)
+                _write_notification(msg)
         if nepse_index:
             self._last_prices["__NEPSE__"] = nepse_index
 
@@ -211,7 +222,7 @@ class LivePriceMonitor:
     def intraday_news_alert(self, position_symbol: str, news_headline: str) -> None:
         """
         If breaking news mentions an open position's company or sector,
-        send an immediate Telegram alert.
+        write an immediate notification alert.
         """
         if position_symbol not in self.positions:
             return
@@ -221,7 +232,7 @@ class LivePriceMonitor:
                f"{news_headline}\n\n"
                f"You hold {getattr(pos, 'qty', 0)} shares @ NPR {entry:,.2f}\n"
                f"Review position immediately.")
-        self._send_telegram(msg)
+        _write_notification(msg)
 
     # ── Data fetching ────────────────────────────────────────────────────────
 
@@ -252,7 +263,7 @@ class LivePriceMonitor:
 
     def _send_position_alert(self, symbol: str, alert: dict,
                               current_price: float, pnl_pct: float) -> None:
-        """Format and send a position alert via Telegram."""
+        """Format and write a position alert notification."""
         emoji = alert.get("emoji", "⚠️")
         msg = (f"{emoji} *Position Alert: {symbol}*\n\n"
                f"{alert['message']}\n\n"
@@ -260,30 +271,7 @@ class LivePriceMonitor:
                f"Stop Loss: NPR {alert.get('stop_loss', 0):,.2f}")
         if "target" in alert:
             msg += f" | Target: NPR {alert['target']:,.2f}"
-        self._send_telegram(msg)
-
-    def _send_telegram(self, message: str) -> bool:
-        """Send Telegram message."""
-        try:
-            import urllib.request
-            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-            if not bot_token or not chat_id or "your_" in bot_token:
-                logger.debug("Telegram not configured")
-                return False
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            payload = json.dumps({
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
-            }).encode("utf-8")
-            req = urllib.request.Request(url, data=payload,
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except Exception as exc:
-            logger.warning("Telegram send failed: %s", exc)
-            return False
+        _write_notification(msg)
 
 
 # ---------------------------------------------------------------------------

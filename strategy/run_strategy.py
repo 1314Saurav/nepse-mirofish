@@ -23,6 +23,17 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json as _json, datetime as _dt
+    from pathlib import Path as _Path
+    _p = _Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    _p.parent.mkdir(parents=True, exist_ok=True)
+    with open(_p, "a", encoding="utf-8") as _f:
+        _f.write(_json.dumps({"ts": _dt.datetime.now().isoformat(), "msg": msg}) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Universe of symbols to analyse (NEPSE blue chips + sector leaders)
 # ---------------------------------------------------------------------------
@@ -367,14 +378,18 @@ def step11_generate_watchlist(
             sector_rotation=sector_rotation,
             regime=regime,
             top_n=10,
-            send_to_telegram=True,
+            send_to_telegram=False,
             save=True,
+        )
+        tier_a_count = sum(1 for e in entries if e.tier == "A")
+        _write_notification(
+            f"Watchlist generated: {len(entries)} entries, {tier_a_count} Tier A | regime={regime}"
         )
         return StepResult(
             step=11, name="Generate watchlist", status="OK",
             duration_s=time.time() - t0,
             output={"entries": len(entries),
-                    "tier_a": sum(1 for e in entries if e.tier == "A")},
+                    "tier_a": tier_a_count},
         ), entries
     except Exception as exc:
         return StepResult(step=11, name="Generate watchlist", status="ERROR",

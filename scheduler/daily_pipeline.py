@@ -14,7 +14,7 @@ Steps
   6. build_daily_seed()              → DB + data/seed/
   7. run MiroFish simulation         → data/processed/simulations/
   8. extract_trading_signal()        → DB + data/processed/signals/
-  9. Send enriched Telegram alert    (signal + market brief)
+  9. Write enriched notification     (signal + market brief → data/notifications/alerts.json)
 
 Usage
 -----
@@ -88,29 +88,16 @@ TOP_50_SYMBOLS = [
 ]
 
 
-# ── Telegram sender ────────────────────────────────────────────────────────────
+# ── Notification writer ────────────────────────────────────────────────────────
 
-def send_telegram(text: str, logger: logging.Logger) -> None:
-    """Send a message via Telegram Bot API (uses requests directly)."""
-    import requests
-
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID",   "")
-    if not token or not chat_id or token.startswith("your_"):
-        logger.warning("Telegram not configured — skipping notification.")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        r = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": text[:4096], "parse_mode": "Markdown"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        logger.info("Telegram message sent.")
-    except Exception as exc:
-        logger.error(f"Telegram send failed: {exc}")
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json, datetime
+    path = _ROOT / "data" / "notifications" / "alerts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": datetime.datetime.now().isoformat(), "msg": msg}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 # ── Pipeline steps ─────────────────────────────────────────────────────────────
@@ -281,7 +268,7 @@ def run_daily_pipeline() -> None:
                 f"{brief}"
             )
 
-        _step("telegram", lambda: send_telegram(msg, logger), logger)
+        _step("write_notification", lambda: _write_notification(msg), logger)
 
     logger.info("========== Pipeline complete ==========\n")
 

@@ -15,12 +15,22 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json as _json, datetime as _dt
+    from pathlib import Path as _Path
+    _p = _Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    _p.parent.mkdir(parents=True, exist_ok=True)
+    with open(_p, "a", encoding="utf-8") as _f:
+        _f.write(_json.dumps({"ts": _dt.datetime.now().isoformat(), "msg": msg}) + "\n")
+
 
 # ---------------------------------------------------------------------------
 # Nepal Standard Time offset (UTC+5:45)
@@ -106,28 +116,24 @@ class BrokerIntegrationLayer:
     Abstraction layer for order routing across three execution modes.
 
     In PAPER mode orders are forwarded to the paper trading engine.
-    In MANUAL mode a Telegram alert is sent with full execution instructions.
+    In MANUAL mode a notification alert is written to data/notifications/alerts.json.
     In API mode a NotImplementedError is raised (NEPSE API not yet available).
 
     Parameters
     ----------
     mode : str
         One of "PAPER", "MANUAL", or "API". Defaults to "PAPER".
-    telegram_chat_id : str | None
-        Telegram chat ID override. Falls back to TELEGRAM_CHAT_ID env var.
     """
 
     def __init__(
         self,
         mode: str = "PAPER",
-        telegram_chat_id: Optional[str] = None,
     ) -> None:
         if mode not in EXECUTION_MODES:
             raise ValueError(
                 f"Invalid mode '{mode}'. Must be one of: {list(EXECUTION_MODES)}"
             )
         self.mode = mode
-        self.telegram_chat_id = telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         self._orders_placed: int = 0
         self._orders_filled: int = 0
         self._orders_missed: int = 0
@@ -277,7 +283,8 @@ class BrokerIntegrationLayer:
         ]
         message = "\n".join(lines)
 
-        self._telegram_send(message)
+        _write_notification(message)
+        print(message)
         logger.info("Manual execution alert sent for %s %s %d.", action, symbol, qty)
         return message
 
@@ -399,34 +406,6 @@ class BrokerIntegrationLayer:
         """Record that an order was not executed."""
         self._orders_missed += 1
         logger.info("Order marked missed: %s", symbol)
-
-    # ── Internal Telegram sender ────────────────────────────────────────────
-
-    def _telegram_send(self, message: str) -> bool:
-        """Send a plain-text message via Telegram Bot API."""
-        import urllib.request
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = self.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not bot_token or not chat_id or "your_" in bot_token:
-            logger.debug("Telegram not configured — alert logged only.")
-            return False
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({
-            "chat_id": chat_id,
-            "text": message[:4096],
-            "parse_mode": "HTML",
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except Exception as exc:
-            logger.warning("Telegram send failed: %s", exc)
-            return False
-
 
 # ---------------------------------------------------------------------------
 # CLI

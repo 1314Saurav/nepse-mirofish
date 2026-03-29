@@ -25,6 +25,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+# Load .env so all keys are available via os.environ
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

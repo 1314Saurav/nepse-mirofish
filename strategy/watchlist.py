@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from pathlib import Path
@@ -17,6 +16,17 @@ from typing import Optional
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json as _json, datetime as _dt
+    from pathlib import Path as _Path
+    _p = _Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    _p.parent.mkdir(parents=True, exist_ok=True)
+    with open(_p, "a", encoding="utf-8") as _f:
+        _f.write(_json.dumps({"ts": _dt.datetime.now().isoformat(), "msg": msg}) + "\n")
+
 
 # ---------------------------------------------------------------------------
 # Scoring weights (sum to 100)
@@ -423,36 +433,6 @@ def format_telegram(entries: list[WatchlistEntry], regime: str,
     return "\n".join(lines)
 
 
-def send_telegram(message: str, bot_token: Optional[str] = None,
-                  chat_id: Optional[str] = None) -> bool:
-    """Send message to Telegram chat. Returns True on success."""
-    import urllib.request
-    import urllib.parse
-
-    bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
-
-    if not bot_token or not chat_id or "your_" in bot_token:
-        logger.info("Telegram not configured — skipping send")
-        return False
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-    }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=payload,
-                                  headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as exc:
-        logger.warning("Telegram send failed: %s", exc)
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Save / load
 # ---------------------------------------------------------------------------
@@ -531,8 +511,7 @@ def generate_daily_watchlist(
 
     if send_to_telegram:
         tg_msg = format_telegram(entries, regime)
-        sent = send_telegram(tg_msg)
-        if sent:
-            logger.info("Watchlist sent to Telegram")
+        _write_notification(tg_msg)
+        logger.info("Watchlist notification written to alerts.json")
 
     return entries

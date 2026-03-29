@@ -41,6 +41,16 @@ def _nst_now() -> datetime:
     return datetime.now(tz=nst)
 
 
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json, datetime
+    path = Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": datetime.datetime.now().isoformat(), "msg": msg}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -233,12 +243,12 @@ class PaperTradingEngine:
         self._save_daily_snapshot(today, regime, mirofish_signal, combined_signals)
         cycle_log["steps"].append({"step": 13, "name": "save_snapshot", "ok": True})
 
-        # Step 14: Send Telegram alert
+        # Step 14: Write notification alert
         tg_msg = self._format_daily_telegram(
             today, mirofish_signal, regime, watchlist, new_orders, exits
         )
-        self._send_telegram(tg_msg)
-        cycle_log["steps"].append({"step": 14, "name": "telegram_alert"})
+        _write_notification(tg_msg)
+        cycle_log["steps"].append({"step": 14, "name": "notification_alert"})
 
         # Step 15: Update accuracy tracker
         try:
@@ -315,7 +325,7 @@ class PaperTradingEngine:
                                           "fill_price": fill_price, "qty": order.qty})
                             msg = (f"PAPER FILL: BUY {order.qty} {sym} @ NPR {fill_price:.2f}\n"
                                    f"Cost: NPR {cost:,.0f} | Cash remaining: NPR {self.capital:,.0f}")
-                            self._send_telegram(msg)
+                            _write_notification(msg)
                     elif order.action == "SELL" and sym in self.positions:
                         pos = self.positions.pop(sym)
                         gross = fill_price * pos.qty
@@ -335,7 +345,7 @@ class PaperTradingEngine:
                                       "fill_price": fill_price, "pnl_pct": pnl_pct})
                         msg = (f"PAPER FILL: SELL {pos.qty} {sym} @ NPR {fill_price:.2f}\n"
                                f"P&L: {pnl_pct:+.2f}% | Cash: NPR {self.capital:,.0f}")
-                        self._send_telegram(msg)
+                        _write_notification(msg)
                     self.pending_orders.remove(order)
                 else:
                     order.fill_status = "MISSED"
@@ -682,27 +692,9 @@ class PaperTradingEngine:
         return "\n".join(lines)
 
     def _send_telegram(self, message: str) -> bool:
-        """Send Telegram message."""
-        try:
-            import urllib.request
-            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-            if not bot_token or not chat_id or "your_" in bot_token:
-                logger.debug("Telegram not configured — skipping send")
-                return False
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            payload = json.dumps({
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
-            }).encode("utf-8")
-            req = urllib.request.Request(url, data=payload,
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except Exception as exc:
-            logger.warning("Telegram send failed: %s", exc)
-            return False
+        """Deprecated — use _write_notification instead."""
+        _write_notification(message)
+        return True
 
     def _save_daily_snapshot(self, today: date, regime: str,
                               signal: dict, combined: dict) -> None:

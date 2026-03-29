@@ -23,6 +23,16 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json, datetime
+    path = Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": datetime.datetime.now().isoformat(), "msg": msg}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -320,9 +330,9 @@ class WeeklyReviewer:
 
         out_path = self.save_review(content, week_num)
 
-        # Send Telegram summary
+        # Write notification summary
         summary = self._extract_telegram_summary(content, week_num)
-        self._send_telegram(summary)
+        _write_notification(summary)
 
         return {
             "status": "ok",
@@ -825,29 +835,9 @@ class WeeklyReviewer:
         )
 
     def _send_telegram(self, message: str) -> bool:
-        """Send message via telegram_bot utility."""
-        try:
-            from paper_trading.telegram_bot import _load_latest_engine_state  # noqa: F401 — confirms import
-            import urllib.request
-            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-            chat_id   = os.environ.get("TELEGRAM_CHAT_ID", "")
-            if not bot_token or not chat_id or "your_" in bot_token:
-                logger.debug("Telegram not configured — skipping weekly review send")
-                return False
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            payload = json.dumps({
-                "chat_id":    chat_id,
-                "text":       message,
-                "parse_mode": "Markdown",
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                url, data=payload, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return resp.status == 200
-        except Exception as exc:
-            logger.warning("Telegram send failed: %s", exc)
-            return False
+        """Deprecated — use _write_notification instead."""
+        _write_notification(message)
+        return True
 
 
 # ---------------------------------------------------------------------------

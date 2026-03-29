@@ -24,6 +24,17 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _write_notification(msg: str) -> None:
+    """Write alert to notifications file for dashboard to read."""
+    import json as _json, datetime as _dt
+    from pathlib import Path as _Path
+    _p = _Path(__file__).resolve().parents[1] / "data" / "notifications" / "alerts.json"
+    _p.parent.mkdir(parents=True, exist_ok=True)
+    with open(_p, "a", encoding="utf-8") as _f:
+        _f.write(_json.dumps({"ts": _dt.datetime.now().isoformat(), "msg": msg}) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Nepal Standard Time offset (UTC+5:45)
 # ---------------------------------------------------------------------------
@@ -369,7 +380,7 @@ class ProductionMonitor:
             "Market opens at 11:00 NST.",
             f"_Generated {_nst_now().strftime('%H:%M NST')}_",
         ]
-        self._telegram_send("\n".join(lines))
+        _write_notification("\n".join(lines))
 
     def send_post_market_summary(self) -> None:
         """
@@ -412,7 +423,7 @@ class ProductionMonitor:
             f"_Market closed. Next session: Sunday–Thursday 11:00 NST._",
             f"_Generated {_nst_now().strftime('%H:%M NST')}_",
         ]
-        self._telegram_send("\n".join(lines))
+        _write_notification("\n".join(lines))
 
     def send_evening_system_check(self) -> None:
         """
@@ -452,7 +463,7 @@ class ProductionMonitor:
             "",
             f"_Generated {_nst_now().strftime('%H:%M NST')}_",
         ]
-        self._telegram_send("\n".join(lines))
+        _write_notification("\n".join(lines))
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -476,33 +487,6 @@ class ProductionMonitor:
             except Exception:
                 pass
         return {}
-
-    def _telegram_send(self, message: str) -> bool:
-        """Send a Telegram message."""
-        import urllib.request
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not bot_token or not chat_id or "your_" in bot_token:
-            logger.debug("Telegram not configured — message logged only.")
-            logger.debug("MSG: %s", message[:200])
-            return False
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({
-            "chat_id": chat_id,
-            "text": message[:4096],
-            "parse_mode": "Markdown",
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except Exception as exc:
-            logger.warning("Telegram send failed: %s", exc)
-            return False
-
 
 # ---------------------------------------------------------------------------
 # APScheduler integration
