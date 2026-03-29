@@ -16,7 +16,7 @@
     {
       "name": "Paper Trading Dashboard (FastAPI)",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "paper_trading.live_dashboard"],
+      "runtimeArgs": ["dashboard/app.py", "--port", "8080"],
       "port": 8080
     }
   ]

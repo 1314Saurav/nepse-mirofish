@@ -1,11 +1,6 @@
 """
 dashboard/app.py
-NEPSE MiroFish — Web Analytics Dashboard (FastAPI)
-
-Serves a full single-page analytical dashboard at http://localhost:8080.
-Replaces Telegram notifications entirely — everything the user needs is in
-the browser: overview KPIs, watchlist/signals, portfolio, market analysis,
-and weekly reports.
+NEPSE MiroFish — Bloomberg Terminal-Style Web Dashboard (FastAPI)
 
 Run:
     python dashboard/app.py
@@ -50,7 +45,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-app = FastAPI(title="NEPSE MiroFish Dashboard", version="1.0.0")
+app = FastAPI(title="NEPSE MiroFish Dashboard", version="2.0.0")
 
 # ---------------------------------------------------------------------------
 # NST helpers
@@ -158,7 +153,7 @@ def _load_snapshots() -> list[dict]:
     if sd:
         snap_dir = sd / "snapshots"
         if not snap_dir.exists():
-            snap_dir = sd  # snapshots may live in session root
+            snap_dir = sd
         for f in sorted(snap_dir.glob("snapshot_*.json")):
             d = _load_json(f)
             if d:
@@ -233,7 +228,6 @@ async def api_overview():
     snaps = _load_snapshots()
     notifs = _load_notifications(10)
 
-    # Portfolio value
     capital = float(state.get("capital", 1_000_000))
     starting = float(state.get("starting_capital", 1_000_000))
     positions = state.get("positions", {})
@@ -244,26 +238,22 @@ async def api_overview():
     portfolio_value = capital + pos_value
     total_return_pct = (portfolio_value / starting - 1) * 100 if starting else 0.0
 
-    # Today's P&L from snapshots
     today_pnl = 0.0
     if len(snaps) >= 2:
         today_pnl = snaps[-1].get("return_pct", 0.0) - snaps[-2].get("return_pct", 0.0)
     elif snaps:
         today_pnl = snaps[-1].get("return_pct", 0.0)
 
-    # Market regime from latest snapshot
     regime = "UNKNOWN"
     mf_score = 0.0
     if snaps:
         regime = snaps[-1].get("regime", "SIDEWAYS")
         mf_score = snaps[-1].get("mirofish_score", 0.0)
 
-    # Signal accuracy
     total_correct = accuracy.get("total_correct", 0)
     total_evaluated = accuracy.get("total_evaluated", 1)
     signal_accuracy = round(total_correct / max(total_evaluated, 1) * 100, 1)
 
-    # Top signals from watchlist
     watchlist = _load_latest_watchlist()
     top_signals = [
         {
@@ -277,6 +267,15 @@ async def api_overview():
         for w in watchlist[:10]
     ]
 
+    # Accuracy by horizon
+    acc_by_horizon = {}
+    for key in ["1d", "3d", "5d", "10d"]:
+        val = accuracy.get(f"accuracy_{key}", accuracy.get(key, None))
+        if val is not None:
+            acc_by_horizon[key] = round(float(val) * 100 if float(val) <= 1 else float(val), 1)
+        else:
+            acc_by_horizon[key] = None
+
     return {
         "nst_time": nst_now().strftime("%Y-%m-%d %H:%M:%S NST"),
         "market_open": is_market_open(),
@@ -288,10 +287,14 @@ async def api_overview():
         "regime": regime,
         "mirofish_score": round(mf_score, 3),
         "signal_accuracy": signal_accuracy,
+        "accuracy_by_horizon": acc_by_horizon,
         "top_signals": top_signals,
         "notifications": notifs,
         "session_id": state.get("paper_trade_id", "unknown"),
         "open_positions": len(positions),
+        "cash": round(capital, 2),
+        "starting_capital": round(starting, 2),
+        "invested": round(pos_value, 2),
     }
 
 
@@ -300,7 +303,6 @@ async def api_watchlist():
     watchlist = _load_latest_watchlist()
     snaps = _load_snapshots()
 
-    # Signal history: last 30 days accuracy from snapshots
     signal_history = []
     for s in snaps[-30:]:
         signal_history.append({
@@ -326,7 +328,6 @@ async def api_portfolio():
     positions_raw = state.get("positions", {})
     trade_log = state.get("trade_log", [])
 
-    # Enrich positions
     positions = []
     total_invested = 0.0
     for sym, pos in positions_raw.items():
@@ -334,8 +335,7 @@ async def api_portfolio():
         qty = int(pos.get("qty", 0))
         invested = ep * qty
         total_invested += invested
-        # Approximate current price from latest snapshot if available
-        current_price = ep  # fallback
+        current_price = ep
         pnl_npr = (current_price - ep) * qty
         pnl_pct = (current_price / ep - 1) * 100 if ep else 0.0
         entry_date_str = pos.get("entry_date", "")
@@ -360,7 +360,6 @@ async def api_portfolio():
             "mirofish_score": round(float(pos.get("mirofish_score", 0)), 3),
         })
 
-    # Equity curve from snapshots
     equity_curve = [
         {
             "date": s.get("date", ""),
@@ -370,7 +369,6 @@ async def api_portfolio():
         for s in snaps
     ]
 
-    # Unrealised P&L
     unrealised_pnl = sum(p["pnl_npr"] for p in positions)
     portfolio_value = capital + total_invested
 
@@ -458,7 +456,7 @@ async def api_weekly_report(background_tasks: BackgroundTasks):
 
 
 # ---------------------------------------------------------------------------
-# HTML dashboard (single page)
+# Bloomberg Terminal HTML dashboard
 # ---------------------------------------------------------------------------
 
 HTML = r"""<!DOCTYPE html>
@@ -466,1349 +464,1535 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NEPSE MiroFish Dashboard</title>
+<title>MIROFISH▸ NEPSE TERMINAL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
-  :root {
-    --bg: #0d1117;
-    --bg2: #161b22;
-    --bg3: #1c2128;
-    --border: #30363d;
-    --text: #e6edf3;
-    --text-muted: #8b949e;
-    --green: #00ff88;
-    --green-dim: #00c86a;
-    --red: #ff4d4f;
-    --yellow: #ffd700;
-    --blue: #58a6ff;
-    --purple: #bc8cff;
-    --orange: #f0883e;
-    --card-shadow: 0 4px 24px rgba(0,0,0,0.4);
-    --radius: 10px;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    display: flex;
-    min-height: 100vh;
-    font-size: 14px;
-  }
+/* ═══════════════════════════════════════════════════════════════════════
+   BLOOMBERG TERMINAL — BASE RESET & VARIABLES
+═══════════════════════════════════════════════════════════════════════ */
+:root {
+  --black:   #000000;
+  --amber:   #FF9500;
+  --green:   #00FF41;
+  --red:     #FF3131;
+  --white:   #FFFFFF;
+  --cyan:    #00FFFF;
+  --gray:    #333333;
+  --gray2:   #222222;
+  --gray3:   #111111;
+  --amber-dim: #CC7700;
+  --green-dim: #00BB33;
+  --red-dim:   #CC2222;
+}
 
-  /* ── Sidebar ── */
-  #sidebar {
-    width: 220px;
-    min-width: 220px;
-    background: var(--bg2);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    padding: 0;
-    position: sticky;
-    top: 0;
-    height: 100vh;
-    z-index: 100;
-  }
-  #sidebar-logo {
-    padding: 20px 18px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  #sidebar-logo h1 {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--green);
-    letter-spacing: 0.5px;
-  }
-  #sidebar-logo p {
-    font-size: 10px;
-    color: var(--text-muted);
-    margin-top: 2px;
-  }
-  #sidebar nav { flex: 1; padding: 12px 0; }
-  .nav-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 18px;
-    cursor: pointer;
-    border-radius: 0;
-    transition: background 0.15s, color 0.15s;
-    color: var(--text-muted);
-    font-size: 13px;
-    font-weight: 500;
-    border-left: 3px solid transparent;
-    user-select: none;
-  }
-  .nav-item:hover { background: var(--bg3); color: var(--text); }
-  .nav-item.active {
-    background: rgba(0,255,136,0.08);
-    color: var(--green);
-    border-left-color: var(--green);
-  }
-  .nav-icon { font-size: 16px; width: 20px; text-align: center; }
-  #sidebar-footer {
-    padding: 14px 18px;
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-  #sidebar-footer #nst-clock {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    margin-bottom: 4px;
-    font-variant-numeric: tabular-nums;
-  }
-  #market-status-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-  }
-  .badge-open { background: rgba(0,255,136,0.15); color: var(--green); }
-  .badge-closed { background: rgba(255,77,79,0.15); color: var(--red); }
-  #refresh-countdown {
-    margin-top: 8px;
-    font-size: 11px;
-    color: var(--text-muted);
-  }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* ── Main content ── */
-  #main {
-    flex: 1;
-    overflow-y: auto;
-    min-width: 0;
-  }
-  .tab-panel { display: none; padding: 24px; max-width: 1400px; }
-  .tab-panel.active { display: block; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
 
-  /* ── Section title ── */
-  .section-title {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-    margin-bottom: 4px;
-  }
-  .section-sub {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-bottom: 20px;
-  }
+body {
+  font-family: 'IBM Plex Mono', 'Courier New', monospace;
+  font-size: 11px;
+  color: var(--amber);
+  background: var(--black);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
 
-  /* ── KPI Cards ── */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-  .kpi-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 18px 20px;
-    box-shadow: var(--card-shadow);
-    position: relative;
-    overflow: hidden;
-  }
-  .kpi-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 3px;
-    background: var(--accent, var(--green));
-  }
-  .kpi-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--text-muted);
-    margin-bottom: 8px;
-  }
-  .kpi-value {
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--text);
-    line-height: 1;
-    margin-bottom: 6px;
-    font-variant-numeric: tabular-nums;
-  }
-  .kpi-sub {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .kpi-positive { color: var(--green) !important; }
-  .kpi-negative { color: var(--red) !important; }
+/* ═══════════════════════════════════════════════════════════════════════
+   SCROLLBARS
+═══════════════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #000; }
+::-webkit-scrollbar-thumb { background: #444; }
+::-webkit-scrollbar-thumb:hover { background: var(--amber); }
 
-  /* ── Cards / panels ── */
-  .card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 18px 20px;
-    box-shadow: var(--card-shadow);
-    margin-bottom: 20px;
-  }
-  .card-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    margin-bottom: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .card-title span { color: var(--text-muted); font-size: 11px; font-weight: 400; }
+/* ═══════════════════════════════════════════════════════════════════════
+   TOP STATUS BAR
+═══════════════════════════════════════════════════════════════════════ */
+#top-bar {
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  background: #000;
+  border-bottom: 1px solid var(--gray);
+  padding: 3px 8px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  height: 22px;
+  overflow: hidden;
+  white-space: nowrap;
+}
 
-  /* ── Tables ── */
-  .tbl-wrap { overflow-x: auto; }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  th {
-    text-align: left;
-    padding: 10px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: 9px 12px;
-    border-bottom: 1px solid rgba(48,54,61,0.5);
-    color: var(--text);
-    white-space: nowrap;
-  }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,0.02); }
-  .row-buy td { border-left: 2px solid var(--green); }
-  .row-sell td { border-left: 2px solid var(--red); }
-  .row-watch td { border-left: 2px solid var(--yellow); }
-  .row-hold td { border-left: 2px solid var(--blue); }
+#top-bar .logo {
+  color: var(--cyan);
+  font-weight: 700;
+  font-size: 12px;
+  margin-right: 10px;
+  letter-spacing: 1px;
+}
 
-  /* ── Badges ── */
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-  }
-  .badge-buy   { background: rgba(0,255,136,0.15); color: var(--green); }
-  .badge-sell  { background: rgba(255,77,79,0.15); color: var(--red); }
-  .badge-watch { background: rgba(255,215,0,0.15); color: var(--yellow); }
-  .badge-hold  { background: rgba(88,166,255,0.15); color: var(--blue); }
-  .badge-bull  { background: rgba(0,255,136,0.15); color: var(--green); }
-  .badge-bear  { background: rgba(255,77,79,0.15); color: var(--red); }
-  .badge-side  { background: rgba(255,215,0,0.12); color: var(--yellow); }
-  .badge-unk   { background: rgba(139,148,158,0.15); color: var(--text-muted); }
+#top-bar .separator {
+  color: var(--gray);
+  margin: 0 6px;
+}
 
-  /* ── Chart containers ── */
-  .chart-wrap { position: relative; height: 260px; }
-  .chart-wrap-lg { position: relative; height: 340px; }
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
-  @media (max-width: 900px) {
-    .two-col { grid-template-columns: 1fr; }
-    .three-col { grid-template-columns: 1fr; }
-  }
+#top-bar .label { color: var(--white); font-size: 10px; }
+#top-bar .val-up { color: var(--green); font-size: 10px; }
+#top-bar .val-down { color: var(--red); font-size: 10px; }
+#top-bar .val-neutral { color: var(--amber); font-size: 10px; }
+#top-bar .clock { color: var(--cyan); font-size: 10px; font-weight: 700; }
+#top-bar .market-open  { color: var(--green); font-size: 10px; }
+#top-bar .market-closed { color: var(--red); font-size: 10px; }
+#top-bar .spacer { flex: 1; }
+#top-bar .refresh-info { color: var(--gray2); font-size: 10px; color: #555; }
 
-  /* ── Notification feed ── */
-  .notif-feed { max-height: 300px; overflow-y: auto; }
-  .notif-item {
-    padding: 10px 12px;
-    border-bottom: 1px solid rgba(48,54,61,0.4);
-    display: flex;
-    gap: 10px;
-    align-items: flex-start;
-  }
-  .notif-item:last-child { border-bottom: none; }
-  .notif-ts {
-    font-size: 10px;
-    color: var(--text-muted);
-    white-space: nowrap;
-    margin-top: 2px;
-    min-width: 100px;
-  }
-  .notif-msg {
-    font-size: 12px;
-    color: var(--text);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
+/* ═══════════════════════════════════════════════════════════════════════
+   FUNCTION KEY BAR
+═══════════════════════════════════════════════════════════════════════ */
+#fkey-bar {
+  background: var(--gray3);
+  border-bottom: 1px solid var(--gray);
+  padding: 2px 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 20px;
+  overflow: hidden;
+}
 
-  /* ── Buttons ── */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 18px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-    transition: all 0.15s;
-    text-decoration: none;
-  }
-  .btn-primary {
-    background: var(--green);
-    color: #0d1117;
-  }
-  .btn-primary:hover { background: var(--green-dim); }
-  .btn-secondary {
-    background: var(--bg3);
-    color: var(--text);
-    border: 1px solid var(--border);
-  }
-  .btn-secondary:hover { border-color: var(--green); color: var(--green); }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.fkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 0 6px;
+  height: 16px;
+  border: 1px solid #444;
+  background: #111;
+  color: var(--white);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  transition: background 0.1s, color 0.1s;
+  user-select: none;
+  letter-spacing: 0.3px;
+}
 
-  /* ── Loading spinner ── */
-  .spinner {
-    display: inline-block;
-    width: 18px; height: 18px;
-    border: 2px solid var(--border);
-    border-top-color: var(--green);
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .loading-overlay {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 40px;
-    color: var(--text-muted);
-    gap: 10px;
-  }
+.fkey:hover { background: var(--amber); color: #000; border-color: var(--amber); }
+.fkey .fnum { color: var(--amber); font-size: 9px; }
+.fkey:hover .fnum { color: #000; }
+.fkey-run { border-color: var(--green); color: var(--green); }
+.fkey-run:hover { background: var(--green); color: #000; border-color: var(--green); }
+.fkey-separator { width: 1px; height: 14px; background: #333; margin: 0 4px; }
 
-  /* ── Reports ── */
-  .report-list { display: flex; flex-direction: column; gap: 8px; }
-  .report-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    background: var(--bg3);
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-  .report-item:hover { border-color: var(--green); }
-  .report-content {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 28px 32px;
-    margin-top: 20px;
-    max-height: 600px;
-    overflow-y: auto;
-    line-height: 1.7;
-  }
-  .report-content h1, .report-content h2, .report-content h3 {
-    color: var(--green);
-    margin: 16px 0 8px;
-  }
-  .report-content p { color: var(--text); margin-bottom: 10px; }
-  .report-content code {
-    background: var(--bg3);
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-size: 12px;
-  }
-  .report-content pre {
-    background: var(--bg3);
-    padding: 14px;
-    border-radius: 6px;
-    overflow-x: auto;
-    margin: 12px 0;
-  }
-  .report-content table { margin: 12px 0; }
-  .report-content th, .report-content td {
-    border: 1px solid var(--border);
-    padding: 7px 12px;
-  }
-  .report-content blockquote {
-    border-left: 3px solid var(--green);
-    padding-left: 14px;
-    color: var(--text-muted);
-    margin: 10px 0;
-  }
+/* ═══════════════════════════════════════════════════════════════════════
+   MAIN GRID
+═══════════════════════════════════════════════════════════════════════ */
+#main-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 18% 1fr 1fr;
+  grid-template-rows: 45vh 1fr;
+  overflow: hidden;
+  min-height: 0;
+}
 
-  /* ── Overview header ── */
-  .overview-header {
-    background: linear-gradient(135deg, var(--bg2) 0%, rgba(0,255,136,0.04) 100%);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px 24px;
-    margin-bottom: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .overview-header-left h2 {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .overview-header-left p {
-    font-size: 13px;
-    color: var(--text-muted);
-    margin-top: 4px;
-  }
-  #header-time {
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--green);
-    font-variant-numeric: tabular-nums;
-  }
+/* Panel borders */
+#main-grid > * {
+  border-right: 1px solid var(--gray);
+  border-bottom: 1px solid var(--gray);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 6px;
+}
 
-  /* ── Score bar ── */
-  .score-bar-wrap { display: flex; align-items: center; gap: 8px; }
-  .score-bar {
-    flex: 1;
-    height: 6px;
-    background: var(--bg3);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .score-bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.4s ease;
-  }
-  .score-bar-fill.high  { background: var(--green); }
-  .score-bar-fill.med   { background: var(--yellow); }
-  .score-bar-fill.low   { background: var(--red); }
+#main-grid > *:last-child { border-right: none; }
 
-  /* ── Accuracy table colors ── */
-  .acc-good { color: var(--green); font-weight: 600; }
-  .acc-ok   { color: var(--yellow); font-weight: 600; }
-  .acc-bad  { color: var(--red); font-weight: 600; }
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL HEADERS
+═══════════════════════════════════════════════════════════════════════ */
+.panel-header {
+  color: var(--white);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--gray);
+  padding-bottom: 3px;
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
 
-  /* ── Scrollbar ── */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+.panel-header .ph-title { color: var(--cyan); }
+.panel-header .ph-sub { color: #555; font-size: 9px; font-weight: 400; }
 
-  /* ── Empty state ── */
-  .empty-state {
-    text-align: center;
-    padding: 40px 20px;
-    color: var(--text-muted);
-  }
-  .empty-state p { margin-top: 8px; font-size: 13px; }
+.sub-header {
+  color: var(--white);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  border-bottom: 1px solid #222;
+  padding: 3px 0 2px;
+  margin: 6px 0 3px;
+  color: #888;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   TABLE STYLES
+═══════════════════════════════════════════════════════════════════════ */
+.term-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.term-table th {
+  color: var(--white);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  padding: 1px 3px;
+  text-align: right;
+  border-bottom: 1px solid #333;
+}
+
+.term-table th:first-child { text-align: left; }
+
+.term-table td {
+  color: var(--amber);
+  padding: 1px 3px;
+  text-align: right;
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+.term-table td:first-child { text-align: left; }
+.term-table tr:hover td { background: #111; }
+
+.td-sym { color: var(--white); font-weight: 700; font-size: 10px; }
+.td-up  { color: var(--green); }
+.td-down { color: var(--red); }
+.td-buy  { color: var(--green); font-weight: 700; }
+.td-sell { color: var(--red); font-weight: 700; }
+.td-hold { color: var(--amber); }
+.td-watch { color: #888; }
+.td-cyan { color: var(--cyan); }
+.td-white { color: var(--white); }
+.td-muted { color: #555; font-size: 9px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 1 — MARKET MOVERS
+═══════════════════════════════════════════════════════════════════════ */
+#panel-movers {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+/* Regime bar */
+.regime-bar-wrap {
+  margin: 2px 0;
+}
+.regime-bar-track {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+}
+.regime-bar-fill {
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.regime-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--white);
+}
+.regime-bull  { color: var(--green); }
+.regime-bear  { color: var(--red); }
+.regime-sideways { color: var(--amber); }
+.regime-unknown  { color: #555; }
+
+/* Accuracy bars */
+.acc-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+  font-size: 10px;
+}
+.acc-label { color: #888; width: 22px; flex-shrink: 0; font-size: 9px; }
+.acc-bar { color: var(--green); font-size: 10px; letter-spacing: -1px; }
+.acc-val { color: var(--amber); font-size: 9px; margin-left: 2px; }
+
+/* Score meter */
+.score-row {
+  font-size: 10px;
+  color: #888;
+  margin: 1px 0;
+}
+.score-row span { color: var(--amber); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 2 — PORTFOLIO SUMMARY
+═══════════════════════════════════════════════════════════════════════ */
+#panel-portfolio {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.port-kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 8px;
+  margin-bottom: 6px;
+}
+
+.port-kpi {
+  padding: 3px 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.port-kpi .kpi-label {
+  color: #666;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.port-kpi .kpi-val {
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.port-kpi .kpi-val.val-up { color: var(--green); }
+.port-kpi .kpi-val.val-down { color: var(--red); }
+.port-kpi .kpi-sub {
+  color: #555;
+  font-size: 9px;
+  margin-top: 0;
+}
+
+.port-wide {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 2px 0;
+  border-bottom: 1px solid #1a1a1a;
+  font-size: 10px;
+}
+.port-wide .pw-label { color: #666; font-size: 9px; letter-spacing: 0.5px; }
+.port-wide .pw-val { color: var(--amber); font-weight: 700; }
+.port-wide .pw-val.val-up { color: var(--green); }
+.port-wide .pw-val.val-down { color: var(--red); }
+.port-wide .pw-pct { font-size: 9px; margin-left: 4px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 3 — TODAY'S SIGNALS
+═══════════════════════════════════════════════════════════════════════ */
+#panel-signals {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.signal-row-buy  { background: rgba(0,255,65,0.04); }
+.signal-row-sell { background: rgba(255,49,49,0.04); }
+.signal-row-hold { background: transparent; }
+
+.conf-bar {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--amber);
+  letter-spacing: -1px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 4 — WATCHLIST
+═══════════════════════════════════════════════════════════════════════ */
+#panel-watchlist {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 5 — EQUITY CURVE
+═══════════════════════════════════════════════════════════════════════ */
+#panel-equity {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+#equity-chart-wrap {
+  position: relative;
+  height: calc(100% - 30px);
+  min-height: 120px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PANEL 6 — AGENT SCORES
+═══════════════════════════════════════════════════════════════════════ */
+#panel-scores {
+  grid-column: 3;
+  grid-row: 2;
+  border-right: none;
+}
+
+.score-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+  font-size: 10px;
+}
+.sbr-sym {
+  color: var(--white);
+  font-weight: 700;
+  width: 52px;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.sbr-bar {
+  font-size: 10px;
+  letter-spacing: -1px;
+  min-width: 70px;
+}
+.sbr-val {
+  font-size: 9px;
+  margin-left: 2px;
+  width: 32px;
+  text-align: right;
+}
+.sbr-act {
+  font-size: 9px;
+  font-weight: 700;
+  width: 32px;
+  text-align: right;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   TICKER BAR
+═══════════════════════════════════════════════════════════════════════ */
+#ticker-bar {
+  flex-shrink: 0;
+  height: 22px;
+  background: #080808;
+  border-top: 1px solid var(--gray);
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#ticker-label {
+  flex-shrink: 0;
+  background: var(--amber);
+  color: #000;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 6px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  letter-spacing: 1px;
+  border-right: 1px solid #000;
+}
+
+#ticker-scroll-wrap {
+  overflow: hidden;
+  flex: 1;
+  height: 100%;
+  position: relative;
+}
+
+#ticker-inner {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  white-space: nowrap;
+  animation: ticker-scroll 60s linear infinite;
+  color: var(--amber);
+  font-size: 10px;
+}
+
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.tick-item {
+  margin: 0 20px;
+  color: var(--amber);
+  font-size: 10px;
+}
+.tick-diamond { color: var(--cyan); margin: 0 8px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   OVERLAY / MODAL
+═══════════════════════════════════════════════════════════════════════ */
+#help-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.92);
+  z-index: 999;
+  align-items: center;
+  justify-content: center;
+}
+#help-overlay.active { display: flex; }
+
+#help-box {
+  background: #080808;
+  border: 1px solid var(--amber);
+  padding: 20px 28px;
+  min-width: 380px;
+  max-width: 500px;
+}
+
+#help-box h2 {
+  color: var(--cyan);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 8px;
+}
+
+.help-row {
+  display: flex;
+  gap: 16px;
+  margin: 4px 0;
+  font-size: 10px;
+}
+.help-key {
+  color: var(--white);
+  font-weight: 700;
+  width: 60px;
+  flex-shrink: 0;
+}
+.help-desc { color: var(--amber); }
+
+.help-close {
+  margin-top: 16px;
+  color: #555;
+  font-size: 9px;
+  cursor: pointer;
+  text-align: center;
+}
+.help-close:hover { color: var(--amber); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   RUN INDICATOR
+═══════════════════════════════════════════════════════════════════════ */
+#run-indicator {
+  display: none;
+  position: fixed;
+  top: 24px;
+  right: 12px;
+  background: #000;
+  border: 1px solid var(--green);
+  color: var(--green);
+  font-size: 10px;
+  padding: 4px 10px;
+  z-index: 500;
+  animation: blink-border 0.5s step-start infinite;
+}
+#run-indicator.active { display: block; }
+
+@keyframes blink-border {
+  50% { border-color: transparent; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   EMPTY STATE
+═══════════════════════════════════════════════════════════════════════ */
+.empty-state {
+  color: #333;
+  font-size: 10px;
+  padding: 8px 0;
+  text-align: center;
+  letter-spacing: 1px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MISC UTILITIES
+═══════════════════════════════════════════════════════════════════════ */
+.text-green  { color: var(--green); }
+.text-red    { color: var(--red); }
+.text-amber  { color: var(--amber); }
+.text-cyan   { color: var(--cyan); }
+.text-white  { color: var(--white); }
+.text-muted  { color: #555; }
+.text-right  { text-align: right; }
+.fw-bold     { font-weight: 700; }
+.fs-9        { font-size: 9px; }
+.fs-10       { font-size: 10px; }
+.fs-11       { font-size: 11px; }
+
+.divider {
+  border: none;
+  border-top: 1px solid #1e1e1e;
+  margin: 4px 0;
+}
 </style>
 </head>
 <body>
 
-<!-- ═══════════════════════════ SIDEBAR ═══════════════════════════ -->
-<div id="sidebar">
-  <div id="sidebar-logo">
-    <h1>🐟 MiroFish</h1>
-    <p>NEPSE Analytics Dashboard</p>
-  </div>
-  <nav id="sidenav">
-    <div class="nav-item active" data-tab="overview">
-      <span class="nav-icon">📊</span> Overview
+<!-- ══════════════════════════════════════════════════════════════════
+     TOP STATUS BAR
+══════════════════════════════════════════════════════════════════ -->
+<div id="top-bar">
+  <span class="logo">MIROFISH▸</span>
+  <span class="separator">|</span>
+  <span class="label">NEPSE:</span>&nbsp;
+  <span class="val-neutral" id="tb-index">——</span>&nbsp;
+  <span class="separator">|</span>
+  <span class="label">NST:</span>&nbsp;
+  <span class="clock" id="tb-clock">——:——:——</span>&nbsp;
+  <span class="separator">|</span>
+  <span id="tb-market-status" class="market-closed">● ——</span>
+  <span class="separator">|</span>
+  <span class="label">SESSION:</span>&nbsp;
+  <span class="val-neutral" id="tb-session">——</span>
+  <span class="separator">|</span>
+  <span class="label">REGIME:</span>&nbsp;
+  <span id="tb-regime" class="val-neutral">——</span>
+  <span class="separator">|</span>
+  <span class="label">SCORE:</span>&nbsp;
+  <span id="tb-score" class="val-neutral">——</span>
+  <div class="spacer"></div>
+  <span class="refresh-info">AUTO-REFRESH: <span id="tb-countdown">30</span>s</span>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     FUNCTION KEY BAR
+══════════════════════════════════════════════════════════════════ -->
+<div id="fkey-bar">
+  <button class="fkey" onclick="scrollToPanel('panel-movers')" title="F1"><span class="fnum">F1</span> MKTW</button>
+  <button class="fkey" onclick="scrollToPanel('panel-portfolio')" title="F2"><span class="fnum">F2</span> PORT</button>
+  <button class="fkey" onclick="scrollToPanel('panel-signals')" title="F3"><span class="fnum">F3</span> SGNL</button>
+  <button class="fkey" onclick="scrollToPanel('panel-movers')" title="F4"><span class="fnum">F4</span> REGM</button>
+  <button class="fkey" onclick="scrollToPanel('panel-watchlist')" title="F5"><span class="fnum">F5</span> WTCH</button>
+  <button class="fkey" onclick="scrollToPanel('panel-equity')" title="F6"><span class="fnum">F6</span> EQTY</button>
+  <div class="fkey-separator"></div>
+  <button class="fkey fkey-run" onclick="runCycle()" title="F7"><span class="fnum" style="color:inherit">F7</span> RUN NOW</button>
+  <div class="fkey-separator"></div>
+  <button class="fkey" onclick="showHelp()" title="F8"><span class="fnum">F8</span> HELP</button>
+  <div class="fkey-separator"></div>
+  <span style="color:#444;font-size:9px;margin-left:4px">LAST REFRESH: <span id="fk-last-refresh" style="color:#666">——</span></span>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     MAIN PANEL GRID
+══════════════════════════════════════════════════════════════════ -->
+<div id="main-grid">
+
+  <!-- ─── PANEL 1: MARKET MOVERS ─────────────────────────────────── -->
+  <div id="panel-movers">
+    <div class="panel-header">
+      <span class="ph-title">TOP MOVERS</span>
+      <span class="ph-sub" id="movers-date">——</span>
     </div>
-    <div class="nav-item" data-tab="watchlist">
-      <span class="nav-icon">🎯</span> Watchlist &amp; Signals
+
+    <table class="term-table" id="movers-table">
+      <thead>
+        <tr>
+          <th>SYMBOL</th>
+          <th>LAST</th>
+          <th>CHG</th>
+          <th>%</th>
+        </tr>
+      </thead>
+      <tbody id="movers-body">
+        <tr><td colspan="4" class="empty-state">NO DATA</td></tr>
+      </tbody>
+    </table>
+
+    <div class="sub-header">─── REGIME ─────────────────</div>
+    <div class="regime-bar-wrap" id="regime-section">
+      <div class="regime-bar-track">
+        <span class="regime-bar-fill" id="regime-bar-chars">░░░░░░░░░░</span>
+        <span class="regime-label" id="regime-text">——</span>
+      </div>
+      <div class="score-row">Score: <span id="regime-score-val">——</span></div>
     </div>
-    <div class="nav-item" data-tab="portfolio">
-      <span class="nav-icon">💼</span> Portfolio
+
+    <div class="sub-header">─── ACCURACY ───────────────</div>
+    <div id="accuracy-section">
+      <div class="acc-row">
+        <span class="acc-label">1d:</span>
+        <span class="acc-bar" id="acc-bar-1d">░░░░░░░░░░</span>
+        <span class="acc-val" id="acc-val-1d">—</span>
+      </div>
+      <div class="acc-row">
+        <span class="acc-label">3d:</span>
+        <span class="acc-bar" id="acc-bar-3d">░░░░░░░░░░</span>
+        <span class="acc-val" id="acc-val-3d">—</span>
+      </div>
+      <div class="acc-row">
+        <span class="acc-label">5d:</span>
+        <span class="acc-bar" id="acc-bar-5d">░░░░░░░░░░</span>
+        <span class="acc-val" id="acc-val-5d">—</span>
+      </div>
+      <div class="acc-row">
+        <span class="acc-label">10d:</span>
+        <span class="acc-bar" id="acc-bar-10d">░░░░░░░░░░</span>
+        <span class="acc-val" id="acc-val-10d">—</span>
+      </div>
     </div>
-    <div class="nav-item" data-tab="analysis">
-      <span class="nav-icon">📈</span> Market Analysis
+  </div><!-- /panel-movers -->
+
+  <!-- ─── PANEL 2: PORTFOLIO SUMMARY ─────────────────────────────── -->
+  <div id="panel-portfolio">
+    <div class="panel-header">
+      <span class="ph-title">PORTFOLIO</span>
+      <span class="ph-sub" id="port-session-label">SESSION: ——</span>
     </div>
-    <div class="nav-item" data-tab="reports">
-      <span class="nav-icon">📋</span> Reports
+
+    <div class="port-wide">
+      <span class="pw-label">TOTAL VALUE</span>
+      <span>
+        <span class="pw-val" id="port-total-val">NPR ——</span>
+        <span class="pw-pct text-muted" id="port-total-pct"></span>
+      </span>
     </div>
-  </nav>
-  <div id="sidebar-footer">
-    <div id="nst-clock">--:--:-- NST</div>
-    <span id="market-status-badge" class="badge-closed">CLOSED</span>
-    <div id="refresh-countdown">Auto-refresh in 30s</div>
+    <div class="port-wide">
+      <span class="pw-label">CASH BALANCE</span>
+      <span class="pw-val" id="port-cash">NPR ——</span>
+    </div>
+    <div class="port-wide">
+      <span class="pw-label">INVESTED</span>
+      <span class="pw-val" id="port-invested">NPR ——</span>
+    </div>
+    <div class="port-wide">
+      <span class="pw-label">UNREALISED P&L</span>
+      <span>
+        <span class="pw-val" id="port-unrealised">NPR ——</span>
+        <span class="pw-pct text-muted" id="port-unrealised-pct"></span>
+      </span>
+    </div>
+    <div class="port-wide">
+      <span class="pw-label">OPEN POSITIONS</span>
+      <span>
+        <span class="pw-val" id="port-open-pos">——</span>
+        <span class="pw-pct text-muted"> / MAX 5</span>
+      </span>
+    </div>
+    <div class="port-wide">
+      <span class="pw-label">TODAY P&L</span>
+      <span>
+        <span class="pw-val" id="port-today-pnl">——</span>
+        <span class="pw-pct text-muted" id="port-today-pnl-pct"></span>
+      </span>
+    </div>
+
+    <div class="sub-header">─── OPEN POSITIONS ──────────────────────</div>
+    <table class="term-table" id="positions-table">
+      <thead>
+        <tr>
+          <th>SYM</th>
+          <th>QTY</th>
+          <th>ENTRY</th>
+          <th>CURR</th>
+          <th>P&L NPR</th>
+          <th>%</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body">
+        <tr><td colspan="6" class="empty-state">NO OPEN POSITIONS</td></tr>
+      </tbody>
+    </table>
+
+    <div class="sub-header" style="margin-top:6px">─── RECENT TRADES ───────────────────────</div>
+    <table class="term-table" id="trades-table">
+      <thead>
+        <tr>
+          <th>DATE</th>
+          <th>SYM</th>
+          <th>ACT</th>
+          <th>QTY</th>
+          <th>PRICE</th>
+          <th>P&L</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="6" class="empty-state">NO TRADE HISTORY</td></tr>
+      </tbody>
+    </table>
+  </div><!-- /panel-portfolio -->
+
+  <!-- ─── PANEL 3: TODAY'S SIGNALS ────────────────────────────────── -->
+  <div id="panel-signals">
+    <div class="panel-header">
+      <span class="ph-title">SIGNALS</span>
+      <span class="ph-sub" id="signals-date">——</span>
+    </div>
+
+    <table class="term-table" id="signals-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>SYM</th>
+          <th>ACT</th>
+          <th>SCORE</th>
+          <th>TARGET</th>
+          <th>STOP</th>
+          <th>CONF</th>
+        </tr>
+      </thead>
+      <tbody id="signals-body">
+        <tr><td colspan="7" class="empty-state">RUN ANALYSIS TO GENERATE SIGNALS</td></tr>
+      </tbody>
+    </table>
+  </div><!-- /panel-signals -->
+
+  <!-- ─── PANEL 4: WATCHLIST ──────────────────────────────────────── -->
+  <div id="panel-watchlist">
+    <div class="panel-header">
+      <span class="ph-title">WATCHLIST</span>
+      <span class="ph-sub" id="wl-count">0 SYMBOLS</span>
+    </div>
+
+    <table class="term-table" id="watchlist-table">
+      <thead>
+        <tr>
+          <th>SYM</th>
+          <th>MF</th>
+          <th>TECH</th>
+          <th>COMB</th>
+          <th>ACT</th>
+          <th>REGIME</th>
+        </tr>
+      </thead>
+      <tbody id="watchlist-body">
+        <tr><td colspan="6" class="empty-state">NO WATCHLIST DATA</td></tr>
+      </tbody>
+    </table>
+  </div><!-- /panel-watchlist -->
+
+  <!-- ─── PANEL 5: EQUITY CURVE ───────────────────────────────────── -->
+  <div id="panel-equity">
+    <div class="panel-header">
+      <span class="ph-title">EQUITY CURVE</span>
+      <span class="ph-sub">PORTFOLIO vs BENCHMARK</span>
+    </div>
+    <div id="equity-chart-wrap">
+      <canvas id="equity-chart"></canvas>
+    </div>
+  </div><!-- /panel-equity -->
+
+  <!-- ─── PANEL 6: AGENT SCORES ───────────────────────────────────── -->
+  <div id="panel-scores">
+    <div class="panel-header">
+      <span class="ph-title">MIROFISH AGENT SCORES</span>
+      <span class="ph-sub">COMBINED</span>
+    </div>
+    <div id="scores-body">
+      <div class="empty-state">NO SCORE DATA</div>
+    </div>
+  </div><!-- /panel-scores -->
+
+</div><!-- /main-grid -->
+
+<!-- ══════════════════════════════════════════════════════════════════
+     BOTTOM TICKER
+══════════════════════════════════════════════════════════════════ -->
+<div id="ticker-bar">
+  <div id="ticker-label">NEWS</div>
+  <div id="ticker-scroll-wrap">
+    <div id="ticker-inner" id="ticker-content">
+      <span class="tick-item">◆ SYSTEM INITIALISING — FETCHING MARKET DATA</span>
+      <span class="tick-diamond">◆</span>
+      <span class="tick-item">◆ NEPSE MIROFISH TERMINAL v2.0 — BLOOMBERG STYLE INTERFACE</span>
+      <span class="tick-diamond">◆</span>
+    </div>
   </div>
 </div>
 
-<!-- ═══════════════════════════ MAIN ═══════════════════════════ -->
-<div id="main">
+<!-- ══════════════════════════════════════════════════════════════════
+     RUN INDICATOR
+══════════════════════════════════════════════════════════════════ -->
+<div id="run-indicator">● CYCLE RUNNING...</div>
 
-  <!-- ──────── Tab 1: Overview ──────── -->
-  <div id="tab-overview" class="tab-panel active">
-    <div class="overview-header">
-      <div class="overview-header-left">
-        <h2>Market Overview</h2>
-        <p id="overview-meta">Loading...</p>
-      </div>
-      <div id="header-time">--:--</div>
-    </div>
-
-    <div class="kpi-grid" id="kpi-grid">
-      <div class="kpi-card" style="--accent:var(--green)">
-        <div class="kpi-label">Portfolio Value</div>
-        <div class="kpi-value" id="kpi-pv">—</div>
-        <div class="kpi-sub" id="kpi-pv-sub">Loading...</div>
-      </div>
-      <div class="kpi-card" style="--accent:var(--blue)">
-        <div class="kpi-label">Today's P&amp;L</div>
-        <div class="kpi-value" id="kpi-pnl">—</div>
-        <div class="kpi-sub" id="kpi-pnl-sub">Total return: —</div>
-      </div>
-      <div class="kpi-card" style="--accent:var(--purple)">
-        <div class="kpi-label">Market Regime</div>
-        <div class="kpi-value" id="kpi-regime">—</div>
-        <div class="kpi-sub" id="kpi-regime-sub">MiroFish score: —</div>
-      </div>
-      <div class="kpi-card" style="--accent:var(--orange)">
-        <div class="kpi-label">Signal Accuracy</div>
-        <div class="kpi-value" id="kpi-acc">—</div>
-        <div class="kpi-sub" id="kpi-acc-sub">Last 30 days</div>
-      </div>
-    </div>
-
-    <div class="two-col">
-      <div class="card">
-        <div class="card-title">Today's Top Signals <span id="signals-ts"></span></div>
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Symbol</th><th>Action</th><th>Score</th>
-                <th>Target</th><th>Stop Loss</th><th>Confidence</th>
-              </tr>
-            </thead>
-            <tbody id="top-signals-body">
-              <tr><td colspan="6" class="loading-overlay"><span class="spinner"></span> Loading...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Recent Notifications <span id="notif-ts"></span></div>
-        <div class="notif-feed" id="notif-feed">
-          <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
-        </div>
-      </div>
-    </div>
+<!-- ══════════════════════════════════════════════════════════════════
+     HELP OVERLAY
+══════════════════════════════════════════════════════════════════ -->
+<div id="help-overlay">
+  <div id="help-box">
+    <h2>KEYBOARD SHORTCUTS</h2>
+    <div class="help-row"><span class="help-key">F1</span><span class="help-desc">MKTW — Market Movers & Regime</span></div>
+    <div class="help-row"><span class="help-key">F2</span><span class="help-desc">PORT — Portfolio Summary</span></div>
+    <div class="help-row"><span class="help-key">F3</span><span class="help-desc">SGNL — Today's Signals</span></div>
+    <div class="help-row"><span class="help-key">F4</span><span class="help-desc">REGM — Regime Detail</span></div>
+    <div class="help-row"><span class="help-key">F5</span><span class="help-desc">WTCH — Watchlist</span></div>
+    <div class="help-row"><span class="help-key">F6</span><span class="help-desc">EQTY — Equity Curve</span></div>
+    <div class="help-row"><span class="help-key">F7</span><span class="help-desc">RUN NOW — Trigger analysis cycle</span></div>
+    <div class="help-row"><span class="help-key">F8</span><span class="help-desc">HELP — This overlay</span></div>
+    <div class="help-row"><span class="help-key">ESC</span><span class="help-desc">Close overlay</span></div>
+    <div class="help-close" onclick="hideHelp()">[ PRESS ESC OR CLICK TO CLOSE ]</div>
   </div>
+</div>
 
-  <!-- ──────── Tab 2: Watchlist & Signals ──────── -->
-  <div id="tab-watchlist" class="tab-panel">
-    <div class="section-title">Watchlist &amp; Signals</div>
-    <div class="section-sub">Full scored watchlist — color coded by action</div>
-
-    <div class="card">
-      <div class="card-title">Full Watchlist <span id="wl-ts"></span></div>
-      <div class="tbl-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th><th>Symbol</th><th>MiroFish Score</th>
-              <th>Technical Score</th><th>Combined Score</th>
-              <th>Action</th><th>Entry Zone</th><th>Target</th>
-              <th>Stop</th><th>Regime</th>
-            </tr>
-          </thead>
-          <tbody id="watchlist-body">
-            <tr><td colspan="10" class="loading-overlay"><span class="spinner"></span> Loading...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Signal History — MiroFish Score (Last 30 Days)</div>
-      <div class="chart-wrap">
-        <canvas id="signal-history-chart"></canvas>
-      </div>
-    </div>
-  </div>
-
-  <!-- ──────── Tab 3: Portfolio ──────── -->
-  <div id="tab-portfolio" class="tab-panel">
-    <div class="section-title">Portfolio</div>
-    <div class="section-sub">Open positions, equity curve, and closed trades</div>
-
-    <div class="three-col" style="margin-bottom:20px">
-      <div class="kpi-card" style="--accent:var(--green)">
-        <div class="kpi-label">Cash Balance</div>
-        <div class="kpi-value" id="port-cash" style="font-size:20px">—</div>
-      </div>
-      <div class="kpi-card" style="--accent:var(--blue)">
-        <div class="kpi-label">Total Invested</div>
-        <div class="kpi-value" id="port-invested" style="font-size:20px">—</div>
-      </div>
-      <div class="kpi-card" style="--accent:var(--orange)">
-        <div class="kpi-label">Unrealised P&amp;L</div>
-        <div class="kpi-value" id="port-unrealised" style="font-size:20px">—</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Portfolio Equity Curve</div>
-      <div class="chart-wrap-lg">
-        <canvas id="equity-chart"></canvas>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Open Positions</div>
-      <div class="tbl-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th><th>Qty</th><th>Entry Price</th>
-              <th>Current Price</th><th>P&amp;L NPR</th><th>P&amp;L %</th>
-              <th>Days Held</th><th>Strategy</th>
-            </tr>
-          </thead>
-          <tbody id="positions-body">
-            <tr><td colspan="8" class="loading-overlay"><span class="spinner"></span> Loading...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Trade History <span>Last 20 closed trades</span></div>
-      <div class="tbl-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th><th>Action</th><th>Entry Price</th>
-              <th>Exit Price</th><th>Qty</th><th>P&amp;L %</th>
-              <th>Entry Date</th><th>Exit Date</th><th>Regime</th>
-            </tr>
-          </thead>
-          <tbody id="trade-history-body">
-            <tr><td colspan="9" class="loading-overlay"><span class="spinner"></span> Loading...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- ──────── Tab 4: Market Analysis ──────── -->
-  <div id="tab-analysis" class="tab-panel">
-    <div class="section-title">Market Analysis</div>
-    <div class="section-sub">Run analysis cycle, regime history, score distribution</div>
-
-    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-      <div style="flex:1">
-        <div style="font-weight:600;margin-bottom:4px">Run Full Analysis Cycle</div>
-        <div style="font-size:12px;color:var(--text-muted)">
-          Triggers the complete MiroFish daily cycle: scrape → news → simulation → indicators → regime → signals → watchlist
-        </div>
-      </div>
-      <button class="btn btn-primary" id="btn-run-cycle" onclick="runCycle()">
-        ▶ Run Analysis Now
-      </button>
-    </div>
-    <div id="cycle-status" style="display:none;margin-bottom:20px" class="card">
-      <div style="color:var(--green)">✓ Analysis cycle triggered in background. Check notifications for results.</div>
-    </div>
-
-    <div class="two-col">
-      <div class="card">
-        <div class="card-title">Market Regime History</div>
-        <div class="chart-wrap">
-          <canvas id="regime-chart"></canvas>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">MiroFish Score Distribution</div>
-        <div class="chart-wrap">
-          <canvas id="score-dist-chart"></canvas>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Sector Breakdown</div>
-      <div id="sector-table-wrap">
-        <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ──────── Tab 5: Reports ──────── -->
-  <div id="tab-reports" class="tab-panel">
-    <div class="section-title">Weekly Reports</div>
-    <div class="section-sub">Auto-generated weekly paper-trading reviews</div>
-
-    <div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:24px">
-      <div style="flex:1">
-        <div style="font-weight:600;margin-bottom:4px">Generate Weekly Report</div>
-        <div style="font-size:12px;color:var(--text-muted)">
-          Run the AI-powered weekly review generator (requires LLM API key)
-        </div>
-      </div>
-      <button class="btn btn-secondary" id="btn-gen-report" onclick="genReport()">
-        📄 Generate Report Now
-      </button>
-    </div>
-
-    <div class="two-col">
-      <div>
-        <div class="card">
-          <div class="card-title">Available Reports</div>
-          <div class="report-list" id="reports-list">
-            <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
-          </div>
-        </div>
-      </div>
-      <div>
-        <div class="card">
-          <div class="card-title">Signal Accuracy Breakdown</div>
-          <div class="tbl-wrap">
-            <table>
-              <thead>
-                <tr><th>Symbol/Period</th><th>1d</th><th>3d</th><th>5d</th><th>10d</th></tr>
-              </thead>
-              <tbody id="accuracy-body">
-                <tr><td colspan="5" class="loading-overlay"><span class="spinner"></span> Loading...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div id="report-viewer" class="report-content" style="display:none"></div>
-  </div>
-
-</div> <!-- #main -->
-
+<!-- ══════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════════════════════════════════ -->
 <script>
-// ══════════════════════════════════════════════════════════════════
-//  MiroFish Dashboard JS
-// ══════════════════════════════════════════════════════════════════
+'use strict';
 
-// ── Chart.js global defaults ──────────────────────────────────────
-Chart.defaults.color = '#8b949e';
-Chart.defaults.borderColor = '#30363d';
-Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
-Chart.defaults.font.size = 12;
+// ── State ────────────────────────────────────────────────────────────
+let equityChart = null;
+let countdownVal = 30;
+let countdownTimer = null;
+let refreshTimer = null;
 
-// ── Tab navigation ────────────────────────────────────────────────
-const tabPanels = document.querySelectorAll('.tab-panel');
-const navItems = document.querySelectorAll('.nav-item');
-const loaded = {};  // track which tabs have been initialised
+// ── Utilities ────────────────────────────────────────────────────────
 
-function switchTab(tabId) {
-  tabPanels.forEach(p => p.classList.remove('active'));
-  navItems.forEach(n => n.classList.remove('active'));
-  document.getElementById('tab-' + tabId).classList.add('active');
-  document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
-  if (!loaded[tabId]) {
-    loaded[tabId] = true;
-    loadTab(tabId);
-  }
+function fmtNPR(val) {
+  if (val === null || val === undefined || isNaN(val)) return 'NPR ——';
+  const n = parseFloat(val);
+  return 'NPR ' + n.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 
-navItems.forEach(n => n.addEventListener('click', () => switchTab(n.dataset.tab)));
-
-function loadTab(tabId) {
-  switch(tabId) {
-    case 'overview':  loadOverview(); break;
-    case 'watchlist': loadWatchlist(); break;
-    case 'portfolio': loadPortfolio(); break;
-    case 'analysis':  loadAnalysis(); break;
-    case 'reports':   loadReports(); break;
-  }
+function fmtNum(val, dec=2) {
+  if (val === null || val === undefined || isNaN(val)) return '——';
+  return parseFloat(val).toLocaleString('en-IN', {minimumFractionDigits: dec, maximumFractionDigits: dec});
 }
 
-// ── NST clock ────────────────────────────────────────────────────
+function fmtPct(val) {
+  if (val === null || val === undefined || isNaN(val)) return '';
+  const n = parseFloat(val);
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toFixed(2) + '%';
+}
+
+function scoreBar(score, len=10) {
+  const s = Math.max(0, Math.min(1, parseFloat(score) || 0));
+  const filled = Math.round(s * len);
+  return '█'.repeat(filled) + '░'.repeat(len - filled);
+}
+
+function scoreColor(score) {
+  const s = parseFloat(score) || 0;
+  if (s > 0.6) return '#00FF41';
+  if (s >= 0.4) return '#FF9500';
+  return '#FF3131';
+}
+
+function actionClass(action) {
+  if (!action) return 'td-watch';
+  const a = action.toUpperCase();
+  if (a === 'BUY')  return 'td-buy';
+  if (a === 'SELL') return 'td-sell';
+  if (a === 'HOLD') return 'td-hold';
+  return 'td-watch';
+}
+
+function pnlClass(val) {
+  const n = parseFloat(val);
+  if (n > 0)  return 'td-up';
+  if (n < 0)  return 'td-down';
+  return '';
+}
+
+function regimeClass(regime) {
+  if (!regime) return 'regime-unknown';
+  const r = regime.toUpperCase();
+  if (r === 'BULL' || r === 'BULLISH') return 'regime-bull';
+  if (r === 'BEAR' || r === 'BEARISH') return 'regime-bear';
+  if (r === 'SIDEWAYS' || r === 'NEUTRAL') return 'regime-sideways';
+  return 'regime-unknown';
+}
+
+function set(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function setText(id, txt) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = txt;
+}
+
+function setClass(id, cls) {
+  const el = document.getElementById(id);
+  if (el) el.className = cls;
+}
+
+// ── NST Clock ────────────────────────────────────────────────────────
+
 function updateClock() {
   const now = new Date();
-  const nst = new Date(now.getTime() + (5*60 + 45)*60000);
-  const h = nst.getUTCHours().toString().padStart(2,'0');
-  const m = nst.getUTCMinutes().toString().padStart(2,'0');
-  const s = nst.getUTCSeconds().toString().padStart(2,'0');
-  document.getElementById('nst-clock').textContent = `${h}:${m}:${s} NST`;
-  document.getElementById('header-time').textContent = `${h}:${m}`;
-  // Market status: Sun-Thu 11:00-15:00 NST  (0=Sun ... 4=Thu)
-  const dow = nst.getUTCDay(); // 0=Sun...6=Sat
-  const totalMin = nst.getUTCHours()*60 + nst.getUTCMinutes();
-  const trading = dow >= 0 && dow <= 4 && totalMin >= 660 && totalMin <= 900;
-  const badge = document.getElementById('market-status-badge');
-  badge.textContent = trading ? 'OPEN' : 'CLOSED';
-  badge.className = trading ? 'badge-open' : 'badge-closed';
+  // Convert to NST (UTC+5:45)
+  const nst = new Date(now.getTime() + (5*60 + 45) * 60000 - now.getTimezoneOffset() * 60000);
+  const h = String(nst.getUTCHours()).padStart(2,'0');
+  const m = String(nst.getUTCMinutes()).padStart(2,'0');
+  const s = String(nst.getUTCSeconds()).padStart(2,'0');
+  setText('tb-clock', `${h}:${m}:${s}`);
 }
+
 setInterval(updateClock, 1000);
 updateClock();
 
-// ── Auto-refresh countdown ────────────────────────────────────────
-let refreshSec = 30;
-setInterval(() => {
-  refreshSec--;
-  if (refreshSec <= 0) {
-    refreshSec = 30;
-    const activeTab = document.querySelector('.tab-panel.active')?.id?.replace('tab-','');
-    if (activeTab) loadTab(activeTab);
+// ── Countdown ────────────────────────────────────────────────────────
+
+function startCountdown() {
+  countdownVal = 30;
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdownVal--;
+    setText('tb-countdown', countdownVal);
+    if (countdownVal <= 0) {
+      countdownVal = 30;
+      fetchAll();
+    }
+  }, 1000);
+}
+
+// ── Panel scroll ─────────────────────────────────────────────────────
+
+function scrollToPanel(id) {
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── Help overlay ─────────────────────────────────────────────────────
+
+function showHelp() {
+  document.getElementById('help-overlay').classList.add('active');
+}
+function hideHelp() {
+  document.getElementById('help-overlay').classList.remove('active');
+}
+
+document.addEventListener('keydown', (e) => {
+  switch(e.key) {
+    case 'F1': e.preventDefault(); scrollToPanel('panel-movers'); break;
+    case 'F2': e.preventDefault(); scrollToPanel('panel-portfolio'); break;
+    case 'F3': e.preventDefault(); scrollToPanel('panel-signals'); break;
+    case 'F4': e.preventDefault(); scrollToPanel('panel-movers'); break;
+    case 'F5': e.preventDefault(); scrollToPanel('panel-watchlist'); break;
+    case 'F6': e.preventDefault(); scrollToPanel('panel-equity'); break;
+    case 'F7': e.preventDefault(); runCycle(); break;
+    case 'F8': e.preventDefault(); showHelp(); break;
+    case 'Escape': hideHelp(); break;
   }
-  document.getElementById('refresh-countdown').textContent =
-    `Auto-refresh in ${refreshSec}s`;
-}, 1000);
+});
 
-// ── Helpers ───────────────────────────────────────────────────────
-function fmt_npr(v) {
-  if (v === null || v === undefined || isNaN(v)) return '—';
-  return 'NPR ' + Number(v).toLocaleString('en-IN', {maximumFractionDigits:0});
-}
+document.getElementById('help-overlay').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('help-overlay')) hideHelp();
+});
 
-function fmt_pct(v, decimals=2) {
-  if (v === null || v === undefined || isNaN(v)) return '—';
-  const n = Number(v);
-  const sign = n >= 0 ? '+' : '';
-  return `${sign}${n.toFixed(decimals)}%`;
-}
+// ── Run cycle ────────────────────────────────────────────────────────
 
-function fmt_score(v) {
-  if (v === null || v === undefined || isNaN(v)) return '—';
-  return Number(v).toFixed(2);
-}
-
-function pnl_class(v) {
-  if (!v && v !== 0) return '';
-  return Number(v) >= 0 ? 'kpi-positive' : 'kpi-negative';
-}
-
-function action_badge(action) {
-  if (!action) return '';
-  const a = action.toUpperCase();
-  const cls = {BUY:'badge-buy', SELL:'badge-sell', WATCH:'badge-watch', HOLD:'badge-hold'}[a] || 'badge-unk';
-  return `<span class="badge ${cls}">${a}</span>`;
-}
-
-function regime_badge(r) {
-  if (!r) return '—';
-  const u = r.toUpperCase();
-  if (u.includes('BULL'))    return `<span class="badge badge-bull">BULL</span>`;
-  if (u.includes('BEAR'))    return `<span class="badge badge-bear">BEAR</span>`;
-  if (u.includes('SIDE'))    return `<span class="badge badge-side">SIDEWAYS</span>`;
-  return `<span class="badge badge-unk">${u}</span>`;
-}
-
-function row_class(action) {
-  if (!action) return '';
-  const a = action.toUpperCase();
-  return {BUY:'row-buy', SELL:'row-sell', WATCH:'row-watch', HOLD:'row-hold'}[a] || '';
-}
-
-function score_bar_html(score, max=100) {
-  const pct = Math.min(100, Math.max(0, (Number(score)/max)*100));
-  const cls = pct>=70 ? 'high' : pct>=40 ? 'med' : 'low';
-  return `<div class="score-bar-wrap">
-    <span style="min-width:36px;font-variant-numeric:tabular-nums">${Number(score).toFixed(0)}</span>
-    <div class="score-bar"><div class="score-bar-fill ${cls}" style="width:${pct}%"></div></div>
-  </div>`;
-}
-
-function ts_label(iso) {
-  if (!iso) return '';
+async function runCycle() {
+  const ind = document.getElementById('run-indicator');
+  ind.classList.add('active');
   try {
-    const d = new Date(iso);
-    return d.toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-  } catch { return iso; }
-}
-
-function empty_row(cols, msg='No data') {
-  return `<tr><td colspan="${cols}" class="empty-state">${msg}</td></tr>`;
-}
-
-async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
-// ── Charts registry (for destroy-on-reload) ───────────────────────
-const charts = {};
-function mkChart(id, config) {
-  if (charts[id]) { charts[id].destroy(); }
-  const ctx = document.getElementById(id);
-  if (!ctx) return;
-  charts[id] = new Chart(ctx, config);
-  return charts[id];
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  Tab 1 — Overview
-// ══════════════════════════════════════════════════════════════════
-async function loadOverview() {
-  try {
-    const d = await api('/api/overview');
-
-    // Header
-    const dow = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const nstNow = new Date(Date.now() + (5*60+45)*60000);
-    document.getElementById('overview-meta').textContent =
-      `${dow[nstNow.getUTCDay()]} · ${nstNow.toISOString().slice(0,10)} · Session: ${d.session_id || '—'} · Open Positions: ${d.open_positions || 0}`;
-
-    // KPI — Portfolio Value
-    document.getElementById('kpi-pv').textContent = d.portfolio_value_formatted || '—';
-    const retEl = document.getElementById('kpi-pv-sub');
-    retEl.textContent = `Total return: ${fmt_pct(d.total_return_pct)}`;
-    retEl.className = 'kpi-sub ' + pnl_class(d.total_return_pct);
-
-    // KPI — Today P&L
-    const pnlEl = document.getElementById('kpi-pnl');
-    pnlEl.textContent = fmt_pct(d.today_pnl_pct);
-    pnlEl.className = 'kpi-value ' + pnl_class(d.today_pnl_pct);
-    document.getElementById('kpi-pnl-sub').textContent = `Total return: ${fmt_pct(d.total_return_pct)}`;
-
-    // KPI — Regime
-    const regEl = document.getElementById('kpi-regime');
-    const r = (d.regime || 'UNKNOWN').toUpperCase();
-    regEl.innerHTML = regime_badge(r);
-    document.getElementById('kpi-regime-sub').textContent =
-      `MiroFish score: ${fmt_score(d.mirofish_score)}`;
-
-    // KPI — Accuracy
-    const accEl = document.getElementById('kpi-acc');
-    accEl.textContent = d.signal_accuracy ? d.signal_accuracy + '%' : '—';
-    accEl.className = 'kpi-value ' + (d.signal_accuracy >= 60 ? 'kpi-positive' : d.signal_accuracy < 45 ? 'kpi-negative' : '');
-
-    // Top signals
-    document.getElementById('signals-ts').textContent = nstNow.toISOString().slice(0,10);
-    const tbody = document.getElementById('top-signals-body');
-    if (!d.top_signals || d.top_signals.length === 0) {
-      tbody.innerHTML = empty_row(6, 'No signals available');
-    } else {
-      tbody.innerHTML = d.top_signals.map(s => `
-        <tr class="${row_class(s.action)}">
-          <td><strong>${s.symbol}</strong></td>
-          <td>${action_badge(s.action)}</td>
-          <td>${score_bar_html(s.score)}</td>
-          <td>${fmt_npr(s.target)}</td>
-          <td>${fmt_npr(s.stop_loss)}</td>
-          <td>${s.confidence ? Number(s.confidence).toFixed(0)+'%' : '—'}</td>
-        </tr>`).join('');
-    }
-
-    // Notifications
-    const feed = document.getElementById('notif-feed');
-    if (!d.notifications || d.notifications.length === 0) {
-      feed.innerHTML = '<div class="empty-state"><p>No notifications yet</p></div>';
-    } else {
-      feed.innerHTML = [...d.notifications].reverse().map(n => `
-        <div class="notif-item">
-          <div class="notif-ts">${ts_label(n.ts)}</div>
-          <div class="notif-msg">${escHtml(n.msg || '')}</div>
-        </div>`).join('');
-    }
-
-  } catch(e) {
-    console.error('Overview load failed:', e);
+    const r = await fetch('/api/run-cycle', { method: 'POST' });
+    const d = await r.json();
+    console.log('Run cycle:', d);
+    setTimeout(() => {
+      ind.classList.remove('active');
+      fetchAll();
+    }, 3000);
+  } catch(err) {
+    console.error(err);
+    ind.classList.remove('active');
   }
 }
 
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+// ── Data fetchers ────────────────────────────────────────────────────
+
+async function fetchOverview() {
+  try {
+    const r = await fetch('/api/overview');
+    const d = await r.json();
+    renderOverview(d);
+  } catch(e) { console.warn('overview fetch failed', e); }
 }
 
-// ══════════════════════════════════════════════════════════════════
-//  Tab 2 — Watchlist & Signals
-// ══════════════════════════════════════════════════════════════════
-async function loadWatchlist() {
+async function fetchPortfolio() {
   try {
-    const d = await api('/api/watchlist');
-    const wl = d.watchlist || [];
-    const now = new Date(Date.now()+(5*60+45)*60000);
-    document.getElementById('wl-ts').textContent = now.toISOString().slice(0,10);
+    const r = await fetch('/api/portfolio');
+    const d = await r.json();
+    renderPortfolio(d);
+  } catch(e) { console.warn('portfolio fetch failed', e); }
+}
 
-    const tbody = document.getElementById('watchlist-body');
-    if (wl.length === 0) {
-      tbody.innerHTML = empty_row(10, 'No watchlist data — run analysis cycle first');
+async function fetchWatchlist() {
+  try {
+    const r = await fetch('/api/watchlist');
+    const d = await r.json();
+    renderWatchlist(d);
+  } catch(e) { console.warn('watchlist fetch failed', e); }
+}
+
+async function fetchNotifications() {
+  try {
+    const r = await fetch('/api/notifications');
+    const d = await r.json();
+    renderTicker(d.notifications || []);
+  } catch(e) { console.warn('notifications fetch failed', e); }
+}
+
+async function fetchAll() {
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8);
+  setText('fk-last-refresh', ts);
+  await Promise.allSettled([
+    fetchOverview(),
+    fetchPortfolio(),
+    fetchWatchlist(),
+    fetchNotifications(),
+  ]);
+}
+
+// ── Renderers ────────────────────────────────────────────────────────
+
+function renderOverview(d) {
+  // Top bar
+  const marketOpen = d.market_open;
+  const statusEl = document.getElementById('tb-market-status');
+  if (statusEl) {
+    statusEl.textContent = marketOpen ? '● MARKET OPEN' : '● MARKET CLOSED';
+    statusEl.className = marketOpen ? 'market-open' : 'market-closed';
+  }
+
+  setText('tb-session', d.session_id || 'demo');
+
+  const regime = (d.regime || 'UNKNOWN').toUpperCase();
+  const regEl = document.getElementById('tb-regime');
+  if (regEl) {
+    regEl.textContent = regime;
+    regEl.className = regimeClass(regime);
+  }
+
+  const score = d.mirofish_score || 0;
+  const scoreEl = document.getElementById('tb-score');
+  if (scoreEl) {
+    scoreEl.textContent = score.toFixed(3);
+    scoreEl.style.color = scoreColor(score);
+  }
+
+  // Portfolio values in top bar — show NEPSE index if available
+  const pvEl = document.getElementById('tb-index');
+  if (pvEl) {
+    const pv = d.portfolio_value || 0;
+    const ret = d.total_return_pct || 0;
+    const sign = ret >= 0 ? '▲+' : '▼';
+    pvEl.textContent = `${fmtNum(pv, 0)} ${sign}${Math.abs(ret).toFixed(2)}%`;
+    pvEl.className = ret >= 0 ? 'val-up' : 'val-down';
+  }
+
+  // Date
+  const today = new Date();
+  const dateStr = today.toISOString().slice(0,10);
+  setText('movers-date', dateStr);
+  setText('signals-date', dateStr);
+  setText('port-session-label', `SESSION: ${d.session_id || 'demo'}`);
+
+  // Movers from top_signals (use as proxy)
+  const movers = (d.top_signals || []).slice(0, 8);
+  const moversBody = document.getElementById('movers-body');
+  if (moversBody) {
+    if (movers.length === 0) {
+      moversBody.innerHTML = '<tr><td colspan="4" class="empty-state">NO DATA</td></tr>';
     } else {
-      tbody.innerHTML = wl.map((w,i) => {
-        const action = w.action || 'WATCH';
-        const mf = w.mirofish_score ?? w.score ?? 0;
-        const tech = w.technical_score ?? w.tech_score ?? 0;
-        const combined = w.combined_score ?? w.score ?? mf;
-        const entry = w.entry_price ?? w.entry_zone ?? w.entry ?? 0;
-        const target = w.target_price ?? w.target ?? 0;
-        const stop = w.stop_loss ?? w.stop ?? 0;
-        const regime = w.regime ?? '—';
-        return `<tr class="${row_class(action)}">
-          <td>${i+1}</td>
-          <td><strong>${w.symbol||'—'}</strong></td>
-          <td>${score_bar_html(mf)}</td>
-          <td>${fmt_score(tech)}</td>
-          <td>${score_bar_html(combined)}</td>
-          <td>${action_badge(action)}</td>
-          <td>${fmt_npr(entry)}</td>
-          <td>${fmt_npr(target)}</td>
-          <td>${fmt_npr(stop)}</td>
-          <td>${regime_badge(regime)}</td>
+      moversBody.innerHTML = movers.map(s => {
+        const act = (s.action || '').toUpperCase();
+        const scr = parseFloat(s.score || 0);
+        const tgt = s.target ? fmtNum(s.target, 0) : '——';
+        const chgClass = act === 'BUY' ? 'td-up' : act === 'SELL' ? 'td-down' : '';
+        const chgSign = act === 'BUY' ? '+' : act === 'SELL' ? '-' : '';
+        return `<tr>
+          <td class="td-sym">${s.symbol}</td>
+          <td>${tgt}</td>
+          <td class="${chgClass}">${chgSign}${(scr*10).toFixed(1)}</td>
+          <td class="${chgClass}">${chgSign}${(scr*100).toFixed(2)}%</td>
         </tr>`;
       }).join('');
     }
+  }
 
-    // Signal history chart
-    const hist = d.signal_history || [];
-    if (hist.length > 0) {
-      const labels = hist.map(h => h.date);
-      const scores = hist.map(h => Number(h.mirofish_score));
-      mkChart('signal-history-chart', {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: 'MiroFish Score',
-            data: scores,
-            borderColor: '#00ff88',
-            backgroundColor: 'rgba(0,255,136,0.07)',
-            tension: 0.35,
-            fill: true,
-            pointRadius: 3,
-            pointHoverRadius: 5,
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: {
-            x: { grid: { color: 'rgba(48,54,61,0.5)' } },
-            y: {
-              grid: { color: 'rgba(48,54,61,0.5)' },
-              ticks: { callback: v => v.toFixed(2) }
-            }
-          }
-        }
-      });
-    }
+  // Regime
+  const barLen = 10;
+  const filled = Math.round(score * barLen);
+  const barChars = '█'.repeat(filled) + '░'.repeat(barLen - filled);
+  const regBarEl = document.getElementById('regime-bar-chars');
+  if (regBarEl) {
+    regBarEl.textContent = barChars;
+    regBarEl.className = `regime-bar-fill ${regimeClass(regime)}`;
+  }
+  setText('regime-text', regime);
+  document.getElementById('regime-text').className = `regime-label ${regimeClass(regime)}`;
+  setText('regime-score-val', score.toFixed(3));
+  document.getElementById('regime-score-val').style.color = scoreColor(score);
 
-  } catch(e) { console.error('Watchlist load failed:', e); }
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  Tab 3 — Portfolio
-// ══════════════════════════════════════════════════════════════════
-async function loadPortfolio() {
-  try {
-    const d = await api('/api/portfolio');
-
-    // KPI cards
-    document.getElementById('port-cash').textContent = d.cash_balance_formatted || '—';
-    document.getElementById('port-invested').textContent = d.total_invested_formatted || '—';
-    const unr = document.getElementById('port-unrealised');
-    unr.textContent = d.unrealised_pnl_formatted || '—';
-    unr.className = 'kpi-value ' + pnl_class(d.unrealised_pnl) + (d.unrealised_pnl < 0 ? ' kpi-negative' : '');
-
-    // Equity curve chart
-    const eq = d.equity_curve || [];
-    if (eq.length > 0) {
-      mkChart('equity-chart', {
-        type: 'line',
-        data: {
-          labels: eq.map(e => e.date),
-          datasets: [
-            {
-              label: 'Portfolio Value (NPR)',
-              data: eq.map(e => e.portfolio_value),
-              borderColor: '#00ff88',
-              backgroundColor: 'rgba(0,255,136,0.06)',
-              tension: 0.35, fill: true,
-              pointRadius: 2,
-            },
-            {
-              label: 'Cash (NPR)',
-              data: eq.map(e => e.cash),
-              borderColor: '#58a6ff',
-              borderDash: [5,3],
-              tension: 0.35, fill: false,
-              pointRadius: 0,
-            }
-          ]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { labels: { color: '#8b949e' } } },
-          scales: {
-            x: { grid: { color: 'rgba(48,54,61,0.4)' } },
-            y: {
-              grid: { color: 'rgba(48,54,61,0.4)' },
-              ticks: { callback: v => 'NPR ' + (v/1000).toFixed(0)+'K' }
-            }
-          }
-        }
-      });
+  // Accuracy
+  const acc = d.accuracy_by_horizon || {};
+  ['1d','3d','5d','10d'].forEach(h => {
+    const v = acc[h];
+    const barId = `acc-bar-${h}`;
+    const valId = `acc-val-${h}`;
+    if (v !== null && v !== undefined) {
+      const pct = parseFloat(v);
+      const filled = Math.round((pct/100) * 8);
+      const bar = '█'.repeat(filled) + '░'.repeat(8 - filled);
+      const barEl = document.getElementById(barId);
+      if (barEl) {
+        barEl.textContent = bar;
+        barEl.style.color = pct >= 60 ? '#00FF41' : pct >= 50 ? '#FF9500' : '#FF3131';
+      }
+      setText(valId, pct.toFixed(0) + '%');
     } else {
-      document.getElementById('equity-chart').parentElement.innerHTML =
-        '<div class="empty-state">No equity history yet</div>';
+      setText(barId, '░░░░░░░░');
+      setText(valId, '—');
     }
+  });
 
-    // Open positions table
-    const pos = d.positions || [];
-    const ptbody = document.getElementById('positions-body');
-    if (pos.length === 0) {
-      ptbody.innerHTML = empty_row(8, 'No open positions');
+  // Signals table
+  const signals = d.top_signals || [];
+  const sigBody = document.getElementById('signals-body');
+  if (sigBody) {
+    if (signals.length === 0) {
+      sigBody.innerHTML = '<tr><td colspan="7" class="empty-state">RUN ANALYSIS TO GENERATE SIGNALS</td></tr>';
     } else {
-      ptbody.innerHTML = pos.map(p => `
-        <tr>
-          <td><strong>${p.symbol}</strong></td>
-          <td>${p.qty}</td>
-          <td>${fmt_npr(p.entry_price)}</td>
-          <td>${fmt_npr(p.current_price)}</td>
-          <td class="${pnl_class(p.pnl_npr)}">${fmt_npr(p.pnl_npr)}</td>
-          <td class="${pnl_class(p.pnl_pct)}">${fmt_pct(p.pnl_pct)}</td>
-          <td>${p.days_held}d</td>
-          <td>${p.strategy || '—'}</td>
-        </tr>`).join('');
+      sigBody.innerHTML = signals.map((s, i) => {
+        const act = (s.action || '').toUpperCase();
+        const sc = parseFloat(s.score || 0);
+        const conf = s.confidence ? Math.round(parseFloat(s.confidence) * (parseFloat(s.confidence) <= 1 ? 100 : 1)) : Math.round(sc * 100);
+        const tgt = s.target ? fmtNum(s.target, 0) : '——';
+        const stp = s.stop_loss ? fmtNum(s.stop_loss, 0) : '——';
+        const rowCls = act === 'BUY' ? 'signal-row-buy' : act === 'SELL' ? 'signal-row-sell' : 'signal-row-hold';
+        const actCls = actionClass(act);
+        const confFilled = Math.round(conf / 100 * 5);
+        const confBar = '█'.repeat(confFilled) + '░'.repeat(5 - confFilled);
+        return `<tr class="${rowCls}">
+          <td class="td-muted">${i+1}</td>
+          <td class="td-sym">${s.symbol}</td>
+          <td class="${actCls}">${act}</td>
+          <td style="color:${scoreColor(sc)}">${sc.toFixed(3)}</td>
+          <td class="td-amber">${tgt}</td>
+          <td class="td-muted">${stp}</td>
+          <td><span class="conf-bar" style="color:${scoreColor(sc/1)}">${confBar}</span><span class="td-muted"> ${conf}%</span></td>
+        </tr>`;
+      }).join('');
     }
+  }
 
-    // Trade history table
-    const trades = d.trade_history || [];
-    const ttbody = document.getElementById('trade-history-body');
-    if (trades.length === 0) {
-      ttbody.innerHTML = empty_row(9, 'No closed trades yet');
-    } else {
-      ttbody.innerHTML = trades.slice().reverse().map(t => `
-        <tr>
-          <td><strong>${t.symbol}</strong></td>
-          <td>${action_badge(t.action)}</td>
-          <td>${fmt_npr(t.entry_price)}</td>
-          <td>${fmt_npr(t.exit_price)}</td>
-          <td>${t.qty}</td>
-          <td class="${pnl_class(t.pnl_pct)}">${fmt_pct(t.pnl_pct)}</td>
-          <td>${t.entry_date||'—'}</td>
-          <td>${t.exit_date||'—'}</td>
-          <td>${regime_badge(t.regime)}</td>
-        </tr>`).join('');
-    }
+  // Portfolio top-level (partial from overview)
+  const portTotalEl = document.getElementById('port-total-val');
+  const portTotalPctEl = document.getElementById('port-total-pct');
+  if (portTotalEl) {
+    portTotalEl.textContent = fmtNPR(d.portfolio_value);
+    const ret = d.total_return_pct || 0;
+    portTotalEl.className = `pw-val ${ret >= 0 ? 'val-up' : 'val-down'}`;
+  }
+  if (portTotalPctEl) {
+    const ret = d.total_return_pct || 0;
+    portTotalPctEl.textContent = fmtPct(ret);
+    portTotalPctEl.className = `pw-pct ${ret >= 0 ? 'text-green' : 'text-red'}`;
+  }
 
-  } catch(e) { console.error('Portfolio load failed:', e); }
-}
+  const cashEl = document.getElementById('port-cash');
+  if (cashEl) { cashEl.textContent = fmtNPR(d.cash); }
 
-// ══════════════════════════════════════════════════════════════════
-//  Tab 4 — Market Analysis
-// ══════════════════════════════════════════════════════════════════
-async function loadAnalysis() {
-  try {
-    const [wl_data, sig_data] = await Promise.all([
-      api('/api/watchlist'),
-      api('/api/signals'),
-    ]);
+  const invEl = document.getElementById('port-invested');
+  if (invEl) { invEl.textContent = fmtNPR(d.invested); }
 
-    const hist = wl_data.signal_history || [];
-    const wl = wl_data.watchlist || [];
+  const openPosEl = document.getElementById('port-open-pos');
+  if (openPosEl) { openPosEl.textContent = d.open_positions || 0; }
 
-    // Regime history chart
-    if (hist.length > 0) {
-      const regimeCounts = {};
-      hist.forEach(h => { regimeCounts[h.regime] = (regimeCounts[h.regime]||0)+1; });
-      const regLabels = Object.keys(regimeCounts);
-      const regColors = regLabels.map(r => {
-        if (r.includes('BULL')) return 'rgba(0,255,136,0.7)';
-        if (r.includes('BEAR')) return 'rgba(255,77,79,0.7)';
-        return 'rgba(255,215,0,0.7)';
-      });
-      mkChart('regime-chart', {
-        type: 'doughnut',
-        data: {
-          labels: regLabels,
-          datasets: [{ data: Object.values(regimeCounts), backgroundColor: regColors, borderWidth: 1, borderColor: '#30363d' }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { labels: { color: '#8b949e', padding: 16 } } }
-        }
-      });
-    } else {
-      document.getElementById('regime-chart').parentElement.innerHTML =
-        '<div class="empty-state">No regime history yet</div>';
-    }
-
-    // Score distribution chart
-    if (wl.length > 0) {
-      const symbols = wl.slice(0,20).map(w => w.symbol || '?');
-      const scores = wl.slice(0,20).map(w => Number(w.combined_score ?? w.score ?? w.mirofish_score ?? 0));
-      const barColors = scores.map(s => s >= 70 ? 'rgba(0,255,136,0.7)' : s >= 40 ? 'rgba(255,215,0,0.7)' : 'rgba(255,77,79,0.7)');
-      mkChart('score-dist-chart', {
-        type: 'bar',
-        data: {
-          labels: symbols,
-          datasets: [{
-            label: 'Score',
-            data: scores,
-            backgroundColor: barColors,
-            borderRadius: 4,
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: {
-            x: { grid: { color: 'rgba(48,54,61,0.4)' }, ticks: { maxRotation: 45 } },
-            y: { grid: { color: 'rgba(48,54,61,0.4)' }, min: 0, max: 100 }
-          }
-        }
-      });
-    }
-
-    // Sector breakdown (derive from watchlist)
-    const sectors = {};
-    wl.forEach(w => {
-      const sec = w.sector || 'Unknown';
-      if (!sectors[sec]) sectors[sec] = {count:0, totalScore:0, buys:0};
-      sectors[sec].count++;
-      sectors[sec].totalScore += Number(w.combined_score??w.score??0);
-      if ((w.action||'').toUpperCase()==='BUY') sectors[sec].buys++;
-    });
-    const secEntries = Object.entries(sectors).sort((a,b)=>b[1].count-a[1].count);
-    const secWrap = document.getElementById('sector-table-wrap');
-    if (secEntries.length === 0) {
-      secWrap.innerHTML = '<div class="empty-state">No sector data — watchlist needed</div>';
-    } else {
-      secWrap.innerHTML = `<div class="tbl-wrap"><table>
-        <thead><tr><th>Sector</th><th>Stocks Watched</th><th>Avg Score</th><th>BUY Signals</th></tr></thead>
-        <tbody>${secEntries.map(([sec,v]) => `
-          <tr>
-            <td>${sec}</td>
-            <td>${v.count}</td>
-            <td>${(v.totalScore/v.count).toFixed(1)}</td>
-            <td><span class="badge badge-buy">${v.buys}</span></td>
-          </tr>`).join('')}
-        </tbody></table></div>`;
-    }
-
-  } catch(e) { console.error('Analysis load failed:', e); }
-}
-
-async function runCycle() {
-  const btn = document.getElementById('btn-run-cycle');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Running...';
-  try {
-    await fetch('/api/run-cycle', {method:'POST'});
-    document.getElementById('cycle-status').style.display = 'block';
-    setTimeout(() => { document.getElementById('cycle-status').style.display = 'none'; }, 8000);
-  } catch(e) { alert('Failed to trigger cycle: ' + e.message); }
-  btn.disabled = false;
-  btn.innerHTML = '▶ Run Analysis Now';
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  Tab 5 — Reports
-// ══════════════════════════════════════════════════════════════════
-async function loadReports() {
-  try {
-    const [rep, sig] = await Promise.all([
-      api('/api/reports'),
-      api('/api/signals'),
-    ]);
-
-    // Reports list
-    const list = document.getElementById('reports-list');
-    const reports = rep.reports || [];
-    if (reports.length === 0) {
-      list.innerHTML = '<div class="empty-state"><p>No reports yet — generate your first one</p></div>';
-    } else {
-      list.innerHTML = reports.map(r => `
-        <div class="report-item" onclick="loadReport('${r.week_num}', this)">
-          <div>
-            <strong>Week ${r.week_num}</strong>
-            <div style="font-size:11px;color:var(--text-muted)">${r.filename}</div>
-          </div>
-          <span style="font-size:12px;color:var(--text-muted)">Click to read →</span>
-        </div>`).join('');
-    }
-
-    // Accuracy breakdown
-    const acc = sig.accuracy_report || {};
-    const tbody = document.getElementById('accuracy-body');
-    const bySymbol = acc.by_symbol || acc.per_symbol || {};
-    const globalRow = {
-      '1d': acc['1d'] ?? acc.accuracy_1d,
-      '3d': acc['3d'] ?? acc.accuracy_3d,
-      '5d': acc['5d'] ?? acc.accuracy_5d,
-      '10d': acc['10d'] ?? acc.accuracy_10d,
-    };
-
-    function acc_td(v) {
-      if (v === null || v === undefined) return '<td>—</td>';
-      const pct = Number(v);
-      const cls = pct >= 65 ? 'acc-good' : pct >= 50 ? 'acc-ok' : 'acc-bad';
-      return `<td class="${cls}">${pct.toFixed(1)}%</td>`;
-    }
-
-    let rows = '';
-    if (Object.values(globalRow).some(v => v !== undefined && v !== null)) {
-      rows += `<tr>
-        <td><strong>Overall</strong></td>
-        ${acc_td(globalRow['1d'])}${acc_td(globalRow['3d'])}${acc_td(globalRow['5d'])}${acc_td(globalRow['10d'])}
-      </tr>`;
-    }
-    Object.entries(bySymbol).slice(0,20).forEach(([sym,v]) => {
-      rows += `<tr>
-        <td>${sym}</td>
-        ${acc_td(v['1d']??v.d1)}${acc_td(v['3d']??v.d3)}${acc_td(v['5d']??v.d5)}${acc_td(v['10d']??v.d10)}
-      </tr>`;
-    });
-    tbody.innerHTML = rows || empty_row(5, 'No accuracy data yet');
-
-  } catch(e) { console.error('Reports load failed:', e); }
-}
-
-async function loadReport(weekNum, el) {
-  document.querySelectorAll('.report-item').forEach(i => i.style.borderColor='');
-  if (el) el.style.borderColor = 'var(--green)';
-  const viewer = document.getElementById('report-viewer');
-  viewer.style.display = 'block';
-  viewer.innerHTML = '<div class="loading-overlay"><span class="spinner"></span> Loading report...</div>';
-  try {
-    const d = await api(`/api/report/${weekNum}`);
-    viewer.innerHTML = marked.parse(d.content || '*(empty report)*');
-    viewer.scrollIntoView({behavior:'smooth', block:'nearest'});
-  } catch(e) {
-    viewer.innerHTML = '<div class="empty-state">Report not found</div>';
+  const todayEl = document.getElementById('port-today-pnl');
+  const todayPctEl = document.getElementById('port-today-pnl-pct');
+  if (todayEl) {
+    const tp = d.today_pnl_pct || 0;
+    todayEl.textContent = fmtPct(tp);
+    todayEl.className = `pw-val ${tp >= 0 ? 'val-up' : 'val-down'}`;
   }
 }
 
-async function genReport() {
-  const btn = document.getElementById('btn-gen-report');
-  btn.disabled = true;
-  btn.textContent = 'Generating...';
-  try {
-    await fetch('/api/weekly-report', {method:'POST'});
-    alert('Weekly report generation started in background. Refresh in a few minutes.');
-  } catch(e) { alert('Failed: ' + e.message); }
-  btn.disabled = false;
-  btn.textContent = '📄 Generate Report Now';
+function renderPortfolio(d) {
+  // Unrealised P&L
+  const unrlEl = document.getElementById('port-unrealised');
+  const unrlPctEl = document.getElementById('port-unrealised-pct');
+  if (unrlEl) {
+    const upnl = d.unrealised_pnl || 0;
+    unrlEl.textContent = fmtNPR(upnl);
+    unrlEl.className = `pw-val ${upnl >= 0 ? 'val-up' : 'val-down'}`;
+  }
+
+  // Positions table
+  const posBody = document.getElementById('positions-body');
+  const positions = d.positions || [];
+  if (posBody) {
+    if (positions.length === 0) {
+      posBody.innerHTML = '<tr><td colspan="6" class="empty-state">NO OPEN POSITIONS</td></tr>';
+    } else {
+      posBody.innerHTML = positions.map(p => {
+        const pnlCls = pnlClass(p.pnl_pct);
+        return `<tr>
+          <td class="td-sym">${p.symbol}</td>
+          <td>${p.qty}</td>
+          <td class="td-amber">${fmtNum(p.entry_price, 0)}</td>
+          <td class="td-cyan">${fmtNum(p.current_price, 0)}</td>
+          <td class="${pnlCls}">${fmtNum(p.pnl_npr, 0)}</td>
+          <td class="${pnlCls}">${fmtPct(p.pnl_pct)}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Trade history
+  const tradesBody = document.getElementById('trades-body');
+  const trades = (d.trade_history || []).reverse().slice(0, 10);
+  if (tradesBody) {
+    if (trades.length === 0) {
+      tradesBody.innerHTML = '<tr><td colspan="6" class="empty-state">NO TRADE HISTORY</td></tr>';
+    } else {
+      tradesBody.innerHTML = trades.map(t => {
+        const act = (t.action || t.type || '').toUpperCase();
+        const actCls = actionClass(act);
+        const pnl = t.pnl || t.realized_pnl || 0;
+        const pnlCls = pnlClass(pnl);
+        return `<tr>
+          <td class="td-muted">${(t.date || t.timestamp || '').slice(0,10)}</td>
+          <td class="td-sym">${t.symbol || '——'}</td>
+          <td class="${actCls}">${act}</td>
+          <td>${t.qty || '——'}</td>
+          <td class="td-amber">${t.price ? fmtNum(t.price, 0) : '——'}</td>
+          <td class="${pnlCls}">${pnl ? fmtNum(pnl, 0) : '——'}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Equity curve
+  const curve = d.equity_curve || [];
+  renderEquityChart(curve);
 }
 
-// ══════════════════════════════════════════════════════════════════
-//  Initial load
-// ══════════════════════════════════════════════════════════════════
-loadOverview();
-loaded['overview'] = true;
+function renderWatchlist(d) {
+  const wl = d.watchlist || [];
+  setText('wl-count', `${wl.length} SYMBOLS`);
+
+  // Watchlist table
+  const wlBody = document.getElementById('watchlist-body');
+  if (wlBody) {
+    if (wl.length === 0) {
+      wlBody.innerHTML = '<tr><td colspan="6" class="empty-state">NO WATCHLIST DATA</td></tr>';
+    } else {
+      wlBody.innerHTML = wl.map(w => {
+        const sym = w.symbol || '——';
+        const mf = parseFloat(w.mirofish_score || w.mf_score || w.score || 0);
+        const tech = parseFloat(w.technical_score || w.tech_score || w.tech || 0);
+        const comb = parseFloat(w.combined_score || w.score || mf);
+        const act = (w.action || 'WATCH').toUpperCase();
+        const regime = (w.regime || w.market_regime || '——').toUpperCase();
+        const actCls = actionClass(act);
+        const regCls = regimeClass(regime);
+        return `<tr>
+          <td class="td-sym">${sym}</td>
+          <td style="color:${scoreColor(mf)}">${mf.toFixed(2)}</td>
+          <td style="color:${scoreColor(tech)}">${tech.toFixed(2)}</td>
+          <td style="color:${scoreColor(comb)}">${comb.toFixed(2)}</td>
+          <td class="${actCls}">${act}</td>
+          <td class="${regCls} fs-9">${regime}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Agent scores panel
+  const scoresBody = document.getElementById('scores-body');
+  if (scoresBody) {
+    const top = wl.slice(0, 15);
+    if (top.length === 0) {
+      scoresBody.innerHTML = '<div class="empty-state">NO SCORE DATA</div>';
+    } else {
+      scoresBody.innerHTML = top.map(w => {
+        const sym = w.symbol || '——';
+        const score = parseFloat(w.combined_score || w.score || w.mirofish_score || 0);
+        const act = (w.action || 'WATCH').toUpperCase();
+        const bar = scoreBar(score, 10);
+        const clr = scoreColor(score);
+        const actCls = actionClass(act);
+        return `<div class="score-bar-row">
+          <span class="sbr-sym">${sym}</span>
+          <span class="sbr-bar" style="color:${clr}">${bar}</span>
+          <span class="sbr-val" style="color:${clr}">${score.toFixed(2)}</span>
+          <span class="sbr-act ${actCls}">${act}</span>
+        </div>`;
+      }).join('');
+    }
+  }
+}
+
+function renderTicker(notifications) {
+  const inner = document.getElementById('ticker-inner');
+  if (!inner) return;
+  if (notifications.length === 0) {
+    inner.innerHTML = `
+      <span class="tick-item">◆ NEPSE MIROFISH TERMINAL — AWAITING DATA</span>
+      <span class="tick-diamond">◆</span>
+      <span class="tick-item">◆ USE F7 TO RUN ANALYSIS CYCLE</span>
+      <span class="tick-diamond">◆</span>
+      <span class="tick-item">◆ NEPSE MIROFISH TERMINAL — AWAITING DATA</span>
+      <span class="tick-diamond">◆</span>
+      <span class="tick-item">◆ USE F7 TO RUN ANALYSIS CYCLE</span>
+    `;
+    return;
+  }
+  const items = notifications.slice(-30).reverse();
+  const html = items.map(n => {
+    const ts = n.ts ? String(n.ts).slice(11,16) : '';
+    const msg = n.msg || n.message || JSON.stringify(n);
+    return `<span class="tick-item">◆ ${ts ? ts + ' ' : ''}${msg}</span>`;
+  }).join('<span class="tick-diamond"> ◆ </span>');
+  // Duplicate for seamless loop
+  inner.innerHTML = html + '<span class="tick-diamond"> ◆◆◆ </span>' + html;
+}
+
+// ── Equity Chart ─────────────────────────────────────────────────────
+
+function renderEquityChart(curve) {
+  const canvas = document.getElementById('equity-chart');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+
+  let labels, portfolioData;
+
+  if (curve.length === 0) {
+    // Demo flat line
+    labels = ['Start', '1W', '2W', '3W', '4W', 'Now'];
+    portfolioData = [1000000, 1000000, 1000000, 1000000, 1000000, 1000000];
+  } else {
+    labels = curve.map(c => c.date ? String(c.date).slice(5) : '');
+    portfolioData = curve.map(c => c.portfolio_value);
+  }
+
+  // Benchmark (flat starting capital or 1M)
+  const startVal = portfolioData[0] || 1000000;
+  const benchmarkData = portfolioData.map(() => startVal);
+
+  if (equityChart) {
+    equityChart.data.labels = labels;
+    equityChart.data.datasets[0].data = portfolioData;
+    equityChart.data.datasets[1].data = benchmarkData;
+    equityChart.update('none');
+    return;
+  }
+
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'PORTFOLIO',
+          data: portfolioData,
+          borderColor: '#00FF41',
+          backgroundColor: 'rgba(0,255,65,0.05)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'BENCHMARK',
+          data: benchmarkData,
+          borderColor: '#555555',
+          backgroundColor: 'transparent',
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: {
+        legend: {
+          display: true,
+          labels: {
+            color: '#666',
+            font: { family: "'IBM Plex Mono', monospace", size: 9 },
+            boxWidth: 12,
+            padding: 8,
+          },
+        },
+        tooltip: {
+          backgroundColor: '#111',
+          borderColor: '#333',
+          borderWidth: 1,
+          titleColor: '#fff',
+          bodyColor: '#FF9500',
+          titleFont: { family: "'IBM Plex Mono', monospace", size: 9 },
+          bodyFont: { family: "'IBM Plex Mono', monospace", size: 9 },
+          callbacks: {
+            label: (ctx) => ` ${ctx.dataset.label}: NPR ${ctx.parsed.y.toLocaleString('en-IN', {minimumFractionDigits: 0, maximumFractionDigits: 0})}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#444',
+            font: { family: "'IBM Plex Mono', monospace", size: 8 },
+            maxTicksLimit: 8,
+            maxRotation: 0,
+          },
+          grid: { color: '#111', drawBorder: false },
+          border: { color: '#333' },
+        },
+        y: {
+          ticks: {
+            color: '#444',
+            font: { family: "'IBM Plex Mono', monospace", size: 8 },
+            callback: (v) => 'NPR ' + (v/1000).toFixed(0) + 'K',
+          },
+          grid: { color: '#111', drawBorder: false },
+          border: { color: '#333' },
+        },
+      },
+    },
+  });
+}
+
+// ── Initialise ───────────────────────────────────────────────────────
+
+async function init() {
+  // Initial render with demo data
+  renderEquityChart([]);
+  renderTicker([]);
+  // Fetch real data
+  await fetchAll();
+  startCountdown();
+}
+
+init();
 </script>
 </body>
 </html>"""
@@ -1827,19 +2011,10 @@ if __name__ == "__main__":
     import uvicorn
     import argparse
 
-    parser = argparse.ArgumentParser(description="NEPSE MiroFish Dashboard")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description="NEPSE MiroFish Bloomberg Terminal Dashboard")
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--host", default="0.0.0.0")
+    args = p.parse_args()
 
-    print(f"\n  NEPSE MiroFish Dashboard")
-    print(f"  http://{args.host}:{args.port}\n")
-
-    uvicorn.run(
-        "dashboard.app:app" if args.reload else app,
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="info",
-    )
+    logger.info("Starting NEPSE MiroFish Terminal on http://%s:%d", args.host, args.port)
+    uvicorn.run(app, host=args.host, port=args.port)
